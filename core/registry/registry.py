@@ -57,16 +57,46 @@ class Registry:
             )
 
 
+def _first_party_plugins() -> list[ToolPlugin]:
+    """Every first-party (core/ops/) plugin, in no particular order.
+
+    Imports are local to this function rather than module-level so
+    that importing `core.registry.registry` doesn't transitively
+    import every op module (and their heavier dependencies like
+    reportlab/pikepdf) just to build a `Registry` instance.
+    """
+    from core.ops.merge_split import ExtractPagesPlugin, MergePlugin
+    from core.ops.metadata import RenamePlugin, SetMetadataPlugin
+    from core.ops.organize import (
+        CompressPlugin,
+        DeletePagesPlugin,
+        ReorderPagesPlugin,
+        RotatePagesPlugin,
+    )
+    from core.ops.security import ProtectPlugin, UnlockPlugin
+    from core.ops.watermark import WatermarkPlugin
+
+    return [
+        MergePlugin(),
+        ExtractPagesPlugin(),
+        ReorderPagesPlugin(),
+        RotatePagesPlugin(),
+        DeletePagesPlugin(),
+        CompressPlugin(),
+        SetMetadataPlugin(),
+        RenamePlugin(),
+        ProtectPlugin(),
+        UnlockPlugin(),
+        WatermarkPlugin(),
+    ]
+
+
 def discover_and_load(registry: Registry) -> None:
     """Discover first-party plugins (core/ops/) and third-party plugins
     (/plugins/) and register them with `registry`.
 
-    Wire this up as each first-party tool is implemented in Phase 1+,
-    e.g.:
-
-        from core.ops.merge_split import MergePlugin
-        registry.register(MergePlugin())
-
-    Third-party discovery mechanism TBD — see SPEC.md section 5.
+    Third-party discovery mechanism TBD — see SPEC.md section 5. Only
+    first-party registration is wired up so far.
     """
-    raise NotImplementedError("Wire up first-party plugin registration in Phase 1.")
+    for plugin in _first_party_plugins():
+        registry.register(plugin)

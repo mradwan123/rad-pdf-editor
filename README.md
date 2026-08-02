@@ -10,9 +10,16 @@ anywhere in the codebase.
 
 ## Status
 
-**Phase 0 — Foundation.** Core interfaces (`Operation`, `DocumentSession`,
-`Pipeline`, plugin `Registry`) are scaffolded. No tools are implemented
-yet — that's Phase 1.
+**Phase 1 — MVP ops (in progress).** Core interfaces (`Operation`,
+`DocumentSession`, `Pipeline`, plugin `Registry`) are frozen and
+tested. First-party operations implemented so far: Merge,
+Split/Extract, Organize (reorder), Rotate, Delete Pages, Compress,
+Metadata, Rename, Protect/Unlock, Watermark — all registered via
+`discover_and_load` and covered by unit + integration tests.
+
+Not yet built: the thumbnail UI + undo/redo wiring in `gui/`, a `cli/`
+entry point, and `core/session/`/`core/security/` (autosave, audit
+log, secure delete — currently empty stub packages).
 
 ## Setup
 

@@ -42,7 +42,7 @@ disallow_untyped_defs = false
 warn_return_any = false
 
 [[tool.mypy.overrides]]
-module = ["fitz.*", "pikepdf.*", "ocrmypdf.*", "pyhanko.*", "pdfplumber.*"]
+module = ["fitz.*", "pikepdf.*", "ocrmypdf.*", "pyhanko.*", "pdfplumber.*", "reportlab.*"]
 ignore_missing_imports = true
 
 # --- ruff: lint + format ---

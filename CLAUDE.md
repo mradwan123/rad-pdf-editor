@@ -83,9 +83,15 @@ the wrong place.
 
 ## Current phase
 
-**Phase 0 — Foundation**, per `docs/SPEC.md` section 4. The
-`Operation`/`DocumentSession`/`Pipeline`/`Registry` classes exist as
-frozen interfaces but `discover_and_load()` and all first-party
-`core/ops/*` implementations are still `NotImplementedError` stubs —
-that's Phase 1. Don't start Phase 1 tool implementations until this
-foundation is reviewed and merged to `main`.
+**Phase 1 — MVP ops (in progress)**, per `docs/SPEC.md` section 4.
+Phase 0 foundation is merged to `main`. `discover_and_load()` now
+registers 11 first-party plugins in `core/ops/`: Merge, Extract Pages,
+Reorder Pages, Rotate Pages, Delete Pages, Compress, Set Metadata,
+Rename, Protect, Unlock, Watermark — each with unit tests, plus an
+integration test proving `discover_and_load` wires them all up.
+
+Still open from the Phase 1 list (SPEC.md section 4): the basic
+thumbnail UI + undo/redo wired to the framework in `gui/`. Also still
+stubs: `core/session/` (autosave, audit log) and `core/security/`
+(secure delete, network sandbox) - both empty packages, not yet
+started.

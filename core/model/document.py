@@ -40,6 +40,11 @@ class DocumentSession:
     source_path: Path | None = None
     operation_log: list[Operation] = field(default_factory=list)
     redo_stack: list[Operation] = field(default_factory=list)
+    #: User-facing output filename (no extension requirement enforced
+    #: here). Additive field - see core/model/operation.py header for
+    #: the frozen-interface versioning policy. None until a Rename
+    #: operation (core/ops/metadata.py) sets it.
+    display_name: str | None = None
 
     def apply(self, operation: Operation) -> DocumentSession:
         """Apply an operation, recording it in the log and clearing
