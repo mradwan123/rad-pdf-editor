@@ -52,6 +52,39 @@ def test_set_metadata_undo_restores_prior_fields(tmp_path: Path) -> None:
     assert _docinfo(restored.working_path)["/Title"] == "First"
 
 
+def test_set_metadata_writes_creation_and_mod_date(tmp_path: Path) -> None:
+    doc = _session(tmp_path)
+    result = doc.apply(
+        SetMetadataOperation(
+            fields={
+                "creation_date": "2025-06-03T12:00:00+00:00",
+                "mod_date": "2025-06-03T12:30:00+00:00",
+            }
+        )
+    )
+    info = _docinfo(result.working_path)
+    assert info["/CreationDate"] == "D:20250603120000+00'00'"
+    assert info["/ModDate"] == "D:20250603123000+00'00'"
+
+
+def test_set_metadata_date_defaults_to_utc_when_naive(tmp_path: Path) -> None:
+    doc = _session(tmp_path)
+    result = doc.apply(SetMetadataOperation(fields={"creation_date": "2025-06-03T12:00:00"}))
+    assert _docinfo(result.working_path)["/CreationDate"] == "D:20250603120000+00'00'"
+
+
+def test_set_metadata_date_handles_negative_offset(tmp_path: Path) -> None:
+    doc = _session(tmp_path)
+    result = doc.apply(SetMetadataOperation(fields={"creation_date": "2025-06-03T12:00:00-05:00"}))
+    assert _docinfo(result.working_path)["/CreationDate"] == "D:20250603120000-05'00'"
+
+
+def test_set_metadata_rejects_invalid_date(tmp_path: Path) -> None:
+    doc = _session(tmp_path)
+    with pytest.raises(OperationError):
+        doc.apply(SetMetadataOperation(fields={"creation_date": "not-a-date"}))
+
+
 def test_rename_sets_display_name(tmp_path: Path) -> None:
     doc = _session(tmp_path)
     assert doc.display_name is None

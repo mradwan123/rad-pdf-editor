@@ -3,7 +3,7 @@
 No module should call `print()` or configure its own logger — import
 `get_logger` from here instead. Logs are written as JSON-lines to the
 OS-appropriate application-data directory and double as the raw feed
-for the audit trail (see core/session/audit_log.py, not yet built).
+for the audit trail (see core/session/audit_log.py).
 
 This never transmits logs over the network: the app makes no network
 calls of any kind, by design (see SPEC.md section 1 and 6.4).
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,8 +46,15 @@ def app_data_dir() -> Path:
     directory — avoids writing anything alongside confidential source
     documents (see SPEC.md section 6.4). Shared by logging, autosave,
     and the audit log.
+
+    Honors the `PDFEDITOR_APP_DATA_DIR` environment variable override
+    when set, so tests (and anyone who wants an isolated/portable data
+    dir) don't have to touch the real per-OS location.
     """
-    if sys.platform == "win32":
+    override = os.environ.get("PDFEDITOR_APP_DATA_DIR")
+    if override:
+        base = Path(override)
+    elif sys.platform == "win32":
         base = Path.home() / "AppData" / "Local" / "PDFEditor"
     elif sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support" / "PDFEditor"

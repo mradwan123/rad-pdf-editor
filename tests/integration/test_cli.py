@@ -6,8 +6,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pikepdf
+import pytest
 
 from cli.main import main
+
+
+@pytest.fixture(autouse=True)
+def _isolated_app_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # cli.main writes session temp dirs and the audit log under
+    # core.logging_config.app_data_dir() - redirect that to a tmp dir
+    # so these tests never touch the real per-OS app-data location.
+    monkeypatch.setenv("PDFEDITOR_APP_DATA_DIR", str(tmp_path / "appdata"))
 
 
 def _make_pdf(path: Path, num_pages: int) -> Path:
@@ -56,3 +65,29 @@ def test_operating_on_encrypted_document_without_password_fails_cleanly(tmp_path
     assert main(["protect", str(src), "-o", str(protected), "--user-password", "secret"]) == 0
     exit_code = main(["set_metadata", str(protected), "-o", str(out), "--title", "X"])
     assert exit_code == 1
+
+
+def test_successful_run_is_recorded_in_the_audit_log(tmp_path: Path) -> None:
+    from core.session.audit_log import AuditLog
+
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    out = tmp_path / "out.pdf"
+
+    assert main(["rotate_pages", str(src), "-o", str(out), "--angle", "90"]) == 0
+
+    entries = AuditLog().read_all()
+    assert len(entries) == 1
+    assert entries[0]["operation"]["type"] == "rotate_pages"
+    assert entries[0]["document"] == str(out)
+
+
+def test_session_temp_dir_is_cleaned_up_after_run(tmp_path: Path) -> None:
+    from core.logging_config import app_data_dir
+
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    out = tmp_path / "out.pdf"
+
+    assert main(["rotate_pages", str(src), "-o", str(out), "--angle", "90"]) == 0
+
+    sessions_dir = app_data_dir() / "sessions"
+    assert not sessions_dir.exists() or list(sessions_dir.iterdir()) == []

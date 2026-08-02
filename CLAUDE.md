@@ -86,12 +86,32 @@ the wrong place.
 **Phase 1 — MVP ops (in progress)**, per `docs/SPEC.md` section 4.
 Phase 0 foundation is merged to `main`. `discover_and_load()` now
 registers 11 first-party plugins in `core/ops/`: Merge, Extract Pages,
-Reorder Pages, Rotate Pages, Delete Pages, Compress, Set Metadata,
-Rename, Protect, Unlock, Watermark — each with unit tests, plus an
-integration test proving `discover_and_load` wires them all up.
+Reorder Pages, Rotate Pages, Delete Pages, Compress, Set Metadata
+(including creation/modification dates), Rename, Protect, Unlock,
+Watermark — each with unit tests, plus an integration test proving
+`discover_and_load` wires them all up. A minimal CLI (`cli/main.py`)
+exposes all 11 as subcommands.
+
+`core/session/` and `core/security/` are also built now:
+- `core/security/secure_delete.py` — multi-pass overwrite + delete.
+- `core/security/sandbox.py` — `network_lockdown()` context manager,
+  defense-in-depth blocking of non-loopback outbound sockets.
+- `core/session/session_dir.py` — `SessionTempDir`, a private
+  per-session working directory under `app_data_dir()`, securely wiped
+  on close. The CLI uses this instead of the OS system temp dir.
+- `core/session/audit_log.py` — append-only local JSONL trail. The CLI
+  records every successful run.
+- `core/session/autosave.py` — checkpoint-based crash recovery
+  (restores the last working-file snapshot; does **not** replay a full
+  undo/redo stack from serialized operations - see the module
+  docstring for why). Not yet wired into the CLI (a single-shot batch
+  tool has little use for it); relevant once the GUI's live editing
+  session exists.
+
+`core.logging_config.app_data_dir()` now honors a
+`PDFEDITOR_APP_DATA_DIR` env var override, so tests (and anyone else)
+can redirect all of the above away from the real per-OS location.
 
 Still open from the Phase 1 list (SPEC.md section 4): the basic
-thumbnail UI + undo/redo wired to the framework in `gui/`. Also still
-stubs: `core/session/` (autosave, audit log) and `core/security/`
-(secure delete, network sandbox) - both empty packages, not yet
-started.
+thumbnail UI + undo/redo wired to the framework in `gui/` - nothing in
+`gui/` exists yet beyond the empty package marker.

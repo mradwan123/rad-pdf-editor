@@ -1,15 +1,16 @@
 """Metadata and Rename operations (SPEC.md Phase 1 list).
 
 Metadata edits the working PDF's document-info dictionary (Title,
-Author, Subject, Keywords). Rename only changes the session's
-user-facing output filename (`DocumentSession.display_name`) - it
-never touches PDF bytes, so it needs no snapshot-restore fallback; a
-precise inverse is trivial.
+Author, Subject, Keywords, Creation Date, Modification Date). Rename
+only changes the session's user-facing output filename
+(`DocumentSession.display_name`) - it never touches PDF bytes, so it
+needs no snapshot-restore fallback; a precise inverse is trivial.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from core.errors import OperationError
@@ -26,23 +27,57 @@ from core.registry.plugin_base import ToolPlugin
 
 CORE_VERSION_RANGE = ">=1.0,<2.0"
 
-#: pikepdf docinfo keys this op is willing to touch - keeps arbitrary
-#: dictionary keys (and thus arbitrary PDF structure edits) out of the
-#: "set some metadata fields" tool's blast radius.
-_ALLOWED_FIELDS = {"title", "author", "subject", "keywords"}
+#: Maps this op's user-facing field names to the pikepdf docinfo keys
+#: they write - keeps arbitrary dictionary keys (and thus arbitrary
+#: PDF structure edits) out of the "set some metadata fields" tool's
+#: blast radius.
+_FIELD_TO_DOCINFO_KEY = {
+    "title": "/Title",
+    "author": "/Author",
+    "subject": "/Subject",
+    "keywords": "/Keywords",
+    "creation_date": "/CreationDate",
+    "mod_date": "/ModDate",
+}
+
+#: Fields whose value is a date - parsed as ISO 8601 and converted to
+#: the PDF date-string format (D:YYYYMMDDHHmmSS+HH'mm') rather than
+#: written through as plain text like the other fields.
+_DATE_FIELDS = {"creation_date", "mod_date"}
+
+
+def _to_pdf_date(value: str) -> str:
+    """Convert an ISO 8601 string (e.g. "2025-06-03T12:00:00+00:00" or
+    "2025-06-03") to the PDF docinfo date format. Naive datetimes are
+    treated as UTC."""
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise OperationError(
+            f"Invalid date '{value}': expected ISO 8601, e.g. 2025-06-03T12:00:00+00:00"
+        ) from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+
+    offset = dt.utcoffset() or timedelta(0)
+    sign = "+" if offset >= timedelta(0) else "-"
+    offset_minutes = int(abs(offset).total_seconds() // 60)
+    offset_hh, offset_mm = divmod(offset_minutes, 60)
+    return f"D:{dt.strftime('%Y%m%d%H%M%S')}{sign}{offset_hh:02d}'{offset_mm:02d}'"
 
 
 @dataclass
 class SetMetadataOperation(Operation):
-    """Sets docinfo fields (title/author/subject/keywords) on the
-    working document. Unset fields are left untouched; pass an empty
-    string to clear a field."""
+    """Sets docinfo fields (title/author/subject/keywords/creation_date/
+    mod_date) on the working document. `creation_date`/`mod_date` must
+    be ISO 8601 strings; the rest are plain text. Unset fields are left
+    untouched; pass an empty string to clear a text field."""
 
     fields: dict[str, str]
     _pre_snapshot: bytes | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        unknown = set(self.fields) - _ALLOWED_FIELDS
+        unknown = set(self.fields) - set(_FIELD_TO_DOCINFO_KEY)
         if unknown:
             raise OperationError(f"Unsupported metadata field(s): {sorted(unknown)}")
 
@@ -54,7 +89,8 @@ class SetMetadataOperation(Operation):
         out_path = allocate_working_path(doc)
         with open_pdf(doc.working_path) as pdf:
             for name, value in self.fields.items():
-                pdf.docinfo[f"/{name.capitalize()}"] = value
+                docinfo_value = _to_pdf_date(value) if name in _DATE_FIELDS else value
+                pdf.docinfo[_FIELD_TO_DOCINFO_KEY[name]] = docinfo_value
             pdf.save(out_path)
 
         return next_session(doc, out_path)

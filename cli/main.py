@@ -2,10 +2,14 @@
 ("scripting entry point, reuses /core directly").
 
 Each subcommand maps 1:1 to a registered ToolPlugin.tool_id. Working
-copies live in a private per-invocation temp directory, never the
-user's own files (SPEC.md section 1) - this CLI does plain cleanup on
-exit, not the multi-pass secure wipe SPEC.md 6.4/2 calls for; that's
-core/security/secure_delete.py, not yet built.
+copies live in a private per-invocation session temp directory under
+the app-data dir (core/session/session_dir.py) - never the user's own
+files or working directory - and are securely wiped on exit
+(core/security/secure_delete.py), not just deleted (SPEC.md section 1
+and 6.4). Outbound networking is blocked for the duration of the
+operation (core/security/sandbox.py), defense in depth on top of this
+codebase simply never calling out. Every successful run is appended to
+the local audit trail (core/session/audit_log.py).
 
 Usage:
     python -m cli.main merge a.pdf b.pdf -o merged.pdf
@@ -18,13 +22,15 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 from core.errors import PDFEditorError
 from core.logging_config import configure_logging, get_logger
 from core.model.document import DocumentSession
 from core.registry.registry import Registry, discover_and_load
+from core.security.sandbox import network_lockdown
+from core.session.audit_log import AuditLog
+from core.session.session_dir import SessionTempDir
 
 log = get_logger(__name__)
 
@@ -69,6 +75,12 @@ def _build_parser() -> argparse.ArgumentParser:
     metadata.add_argument("--author")
     metadata.add_argument("--subject")
     metadata.add_argument("--keywords")
+    metadata.add_argument(
+        "--creation-date", help="ISO 8601, e.g. 2025-06-03T12:00:00+00:00 or 2025-06-03"
+    )
+    metadata.add_argument(
+        "--mod-date", help="ISO 8601, e.g. 2025-06-03T12:00:00+00:00 or 2025-06-03"
+    )
 
     rename = sub.add_parser("rename", help="Set the session's output filename")
     add_single_input(rename)
@@ -118,6 +130,8 @@ def _build_kwargs(args: argparse.Namespace) -> dict[str, object]:
                 "author": args.author,
                 "subject": args.subject,
                 "keywords": args.keywords,
+                "creation_date": args.creation_date,
+                "mod_date": args.mod_date,
             }.items()
             if value is not None
         }
@@ -141,32 +155,31 @@ def main(argv: list[str] | None = None) -> int:
     discover_and_load(registry)
     plugin = registry.get(args.tool_id)
 
-    session_dir = Path(tempfile.mkdtemp(prefix="pdfeditor_cli_"))
-    try:
-        doc = DocumentSession(working_path=None, source_path=None)
-        if args.tool_id != "merge":
-            working = session_dir / f"working{args.input.suffix or '.pdf'}"
-            shutil.copyfile(args.input, working)
-            doc = DocumentSession(working_path=working, source_path=args.input)
+    with network_lockdown(), SessionTempDir() as session:
+        try:
+            doc = DocumentSession(working_path=None, source_path=None)
+            if args.tool_id != "merge":
+                working = session.path / f"working{args.input.suffix or '.pdf'}"
+                shutil.copyfile(args.input, working)
+                doc = DocumentSession(working_path=working, source_path=args.input)
 
-        kwargs = _build_kwargs(args)
-        operation = plugin.build_operation(**kwargs)
-        result = doc.apply(operation)
+            kwargs = _build_kwargs(args)
+            operation = plugin.build_operation(**kwargs)
+            result = doc.apply(operation)
 
-        if result.working_path is None:
-            print("Operation produced no output document.", file=sys.stderr)
+            if result.working_path is None:
+                print("Operation produced no output document.", file=sys.stderr)
+                return 1
+
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(result.working_path, args.output)
+            AuditLog().record_operation(operation, document_label=str(args.output))
+            print(f"{operation.describe()} -> {args.output}")
+            return 0
+        except PDFEditorError as exc:
+            log.error("CLI operation failed: %s", exc)
+            print(f"Error: {exc}", file=sys.stderr)
             return 1
-
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(result.working_path, args.output)
-        print(f"{operation.describe()} -> {args.output}")
-        return 0
-    except PDFEditorError as exc:
-        log.error("CLI operation failed: %s", exc)
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    finally:
-        shutil.rmtree(session_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

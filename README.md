@@ -14,12 +14,20 @@ anywhere in the codebase.
 `DocumentSession`, `Pipeline`, plugin `Registry`) are frozen and
 tested. First-party operations implemented so far: Merge,
 Split/Extract, Organize (reorder), Rotate, Delete Pages, Compress,
-Metadata, Rename, Protect/Unlock, Watermark — all registered via
-`discover_and_load` and covered by unit + integration tests.
+Metadata (incl. creation/mod dates), Rename, Protect/Unlock,
+Watermark — all registered via `discover_and_load` and covered by
+unit + integration tests. A minimal CLI (`python -m cli.main`) exposes
+all of them.
 
-Not yet built: the thumbnail UI + undo/redo wiring in `gui/`, a `cli/`
-entry point, and `core/session/`/`core/security/` (autosave, audit
-log, secure delete — currently empty stub packages).
+Session/security infrastructure is in place: a private per-session
+temp directory (`core/session/session_dir.py`), secure multi-pass
+delete (`core/security/secure_delete.py`), an append-only audit log
+(`core/session/audit_log.py`), a checkpoint-based autosave/crash-
+recovery journal (`core/session/autosave.py`), and a defense-in-depth
+network lockdown (`core/security/sandbox.py`). The CLI is wired to the
+session dir, network lockdown, and audit log.
+
+Not yet built: the thumbnail UI + undo/redo wiring in `gui/`.
 
 ## Setup
 
