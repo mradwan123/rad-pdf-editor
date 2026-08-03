@@ -20,6 +20,8 @@ from PySide6.QtCore import QModelIndex
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
+from gui.dialogs.bates_numbering_dialog import BatesNumberingDialog
+from gui.dialogs.crop_dialog import CropDialog
 from gui.dialogs.merge_dialog import MergeDialog
 from gui.dialogs.rotate_dialog import RotateDialog
 from gui.main_window import MainWindow
@@ -203,4 +205,55 @@ def test_running_a_tool_without_open_document_shows_error_not_crash(
     with patch("gui.main_window.QMessageBox.critical") as mock_critical:
         window._run_tool("rotate_pages", RotateDialog)
     mock_critical.assert_called_once()
+    window.close()
+
+
+def test_phase2_tools_are_all_registered_in_the_menu(qapp: QApplication) -> None:
+    window = MainWindow()
+    for tool_id in (
+        "crop",
+        "resize",
+        "n_up",
+        "grayscale",
+        "header_footer",
+        "bates_numbering",
+        "flatten",
+        "remove_annotations",
+    ):
+        assert tool_id in window.tool_actions
+    window.close()
+
+
+def test_crop_then_bates_numbering_via_tools_menu(qapp: QApplication, tmp_path: Path) -> None:
+    import pdfplumber
+
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+
+    def fake_crop(self: CropDialog) -> QDialog.DialogCode:
+        self.margin_top.setValue(20)
+        self.margin_left.setValue(10)
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(CropDialog, "exec", fake_crop):
+        window._run_tool("crop", CropDialog)
+
+    with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
+        assert [float(x) for x in pdf.pages[0].mediabox] == [10.0, 0.0, 300.0, 380.0]
+
+    def fake_bates(self: BatesNumberingDialog) -> QDialog.DialogCode:
+        self.prefix.setText("DOC-")
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(BatesNumberingDialog, "exec", fake_bates):
+        window._run_tool("bates_numbering", BatesNumberingDialog)
+
+    with pdfplumber.open(window.controller.doc.working_path) as pdf:
+        assert pdf.pages[0].extract_text() == "DOC-00001"
+        assert pdf.pages[1].extract_text() == "DOC-00002"
+
+    assert len(window.controller.doc.operation_log) == 2
+    assert window.undo_action.isEnabled()
     window.close()

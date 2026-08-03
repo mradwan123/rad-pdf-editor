@@ -189,3 +189,45 @@ hand-rolled substitute.
 
 Not yet built from the Phase 1 GUI wishlist: a pipeline/Workflow
 builder UI (that's Phase 5).
+
+## Phase 2 — Forms & layout (8 of the list done)
+
+Per `docs/SPEC.md` section 4's Phase 2 list, implemented so far:
+Crop, Resize, N-up, Grayscale, Header/Footer, Bates/page numbering,
+Flatten, Remove Annotations. All registered via `discover_and_load`,
+exposed as CLI subcommands, and as GUI Tools-menu dialogs (same
+`BaseToolDialog` pattern as Phase 1). **Not yet built: Fill & Sign,
+Create Forms** — both need real form-field interaction (detecting
+AcroForm fields, an in-canvas fill/sign UI), a materially bigger scope
+than the rest of this batch; deliberately deferred rather than rushed.
+
+- `core/ops/layout.py` — Crop, Resize, N-up, Grayscale. Grayscale
+  rasterizes affected pages via PyMuPDF (`fitz`) rather than remapping
+  color operators in the content stream - a real, working tradeoff
+  (loses text selection on converted pages), documented in the module
+  docstring, not a shortcut taken silently. N-up reuses `add_overlay`
+  with `page.as_form_xobject()` + `pdf.copy_foreign(...)`, the same
+  mechanism Watermark/HeaderFooter use for a single page, just called
+  per grid cell.
+- `core/ops/numbering.py` — Header/Footer and Bates numbering. Unlike
+  Watermark's one-overlay-reused-everywhere, each page gets its own
+  reportlab-rendered stamp (Bates text differs per page; header/footer
+  must match each page's own size for correct positioning).
+- `core/ops/forms.py` — Flatten and Remove Annotations. Flatten's key
+  discovery: `page.add_overlay()` accepts a raw appearance-stream
+  `Object` directly (an annotation's `/AP` `/N`), not just a `Page` or
+  `Page.as_form_xobject()` - no need to hand-roll BBox/Matrix/Rect
+  placement math. Verified against a manually-constructed annotation
+  (pikepdf has no built-in "add an annotation" helper) with `pdfplumber`
+  confirming the composited rect landed at the exact `/Rect` position.
+- Verification approach matched Phase 1: every op checked against real
+  pikepdf/pdfplumber/fitz output (not just "didn't raise") before
+  writing the pytest suite - e.g. Grayscale's test samples actual
+  pixel values to confirm r==g==b, not just that the file still opens.
+- One real bug caught by mypy during this batch, not by a human
+  reading it twice: `gui/dialogs/resize_dialog.py` originally named
+  its width/height spinbox attributes `self.width`/`self.height`,
+  silently shadowing `QWidget.width()`/`height()` (the widget's own
+  geometry methods) - `mypy --strict` flagged "cannot assign to a
+  method" immediately. Renamed to `page_width`/`page_height`. Worth
+  remembering when naming QWidget subclass attributes generally.

@@ -29,14 +29,22 @@ from core.errors import PDFEditorError
 from core.logging_config import get_logger
 from gui.controller import AppController
 from gui.dialogs.base_tool_dialog import BaseToolDialog
+from gui.dialogs.bates_numbering_dialog import BatesNumberingDialog
 from gui.dialogs.compress_dialog import CompressDialog
+from gui.dialogs.crop_dialog import CropDialog
 from gui.dialogs.delete_pages_dialog import DeletePagesDialog
 from gui.dialogs.extract_pages_dialog import ExtractPagesDialog
+from gui.dialogs.flatten_dialog import FlattenDialog
+from gui.dialogs.grayscale_dialog import GrayscaleDialog
+from gui.dialogs.header_footer_dialog import HeaderFooterDialog
 from gui.dialogs.merge_dialog import MergeDialog
 from gui.dialogs.metadata_dialog import MetadataDialog
+from gui.dialogs.n_up_dialog import NUpDialog
 from gui.dialogs.protect_dialog import ProtectDialog
+from gui.dialogs.remove_annotations_dialog import RemoveAnnotationsDialog
 from gui.dialogs.rename_dialog import RenameDialog
 from gui.dialogs.reorder_pages_dialog import ReorderPagesDialog
+from gui.dialogs.resize_dialog import ResizeDialog
 from gui.dialogs.rotate_dialog import RotateDialog
 from gui.dialogs.unlock_dialog import UnlockDialog
 from gui.dialogs.watermark_dialog import WatermarkDialog
@@ -66,6 +74,14 @@ _TOOL_DIALOGS: dict[str, _DialogFactory] = {
     "protect": ProtectDialog,
     "unlock": UnlockDialog,
     "watermark": WatermarkDialog,
+    "crop": CropDialog,
+    "resize": ResizeDialog,
+    "n_up": NUpDialog,
+    "grayscale": GrayscaleDialog,
+    "header_footer": HeaderFooterDialog,
+    "bates_numbering": BatesNumberingDialog,
+    "flatten": FlattenDialog,
+    "remove_annotations": RemoveAnnotationsDialog,
 }
 
 

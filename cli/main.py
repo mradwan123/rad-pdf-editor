@@ -101,6 +101,66 @@ def _build_parser() -> argparse.ArgumentParser:
     watermark.add_argument("--opacity", type=float, default=0.3)
     watermark.add_argument("--font-size", type=int, default=40)
 
+    crop = sub.add_parser("crop", help="Trim margins off pages")
+    add_single_input(crop)
+    crop.add_argument("--margin-top", type=float, default=0.0)
+    crop.add_argument("--margin-right", type=float, default=0.0)
+    crop.add_argument("--margin-bottom", type=float, default=0.0)
+    crop.add_argument("--margin-left", type=float, default=0.0)
+    crop.add_argument("--pages", default="", help="comma-separated 1-indexed pages; default: all")
+
+    resize = sub.add_parser("resize", help="Scale pages to a target size in points")
+    add_single_input(resize)
+    resize.add_argument("--width", type=float, required=True)
+    resize.add_argument("--height", type=float, required=True)
+    resize.add_argument("--pages", default="", help="comma-separated 1-indexed pages; default: all")
+
+    n_up = sub.add_parser("n_up", help="Combine several pages per output sheet")
+    add_single_input(n_up)
+    n_up.add_argument("--pages-per-sheet", type=int, required=True)
+    n_up.add_argument("--sheet-width", type=float, default=612.0)
+    n_up.add_argument("--sheet-height", type=float, default=792.0)
+
+    grayscale = sub.add_parser("grayscale", help="Convert pages to grayscale (rasterizes them)")
+    add_single_input(grayscale)
+    grayscale.add_argument("--pages", default="", help="comma-separated 1-indexed pages; default: all")
+    grayscale.add_argument("--dpi", type=int, default=200)
+
+    header_footer = sub.add_parser("header_footer", help="Stamp header/footer text on every page")
+    add_single_input(header_footer)
+    header_footer.add_argument("--header-text", default="")
+    header_footer.add_argument("--footer-text", default="")
+    header_footer.add_argument("--font-size", type=int, default=10)
+    header_footer.add_argument(
+        "--pages", default="", help="comma-separated 1-indexed pages; default: all"
+    )
+
+    bates = sub.add_parser("bates_numbering", help="Stamp sequential page numbers")
+    add_single_input(bates)
+    bates.add_argument("--prefix", default="")
+    bates.add_argument("--start", type=int, default=1)
+    bates.add_argument("--digits", type=int, default=5)
+    bates.add_argument(
+        "--position",
+        default="bottom-right",
+        choices=["bottom-right", "bottom-left", "bottom-center", "top-right", "top-left"],
+    )
+    bates.add_argument("--font-size", type=int, default=10)
+    bates.add_argument("--pages", default="", help="comma-separated 1-indexed pages; default: all")
+
+    flatten = sub.add_parser("flatten", help="Bake annotation appearances into page content")
+    add_single_input(flatten)
+    flatten.add_argument("--pages", default="", help="comma-separated 1-indexed pages; default: all")
+
+    remove_annotations = sub.add_parser("remove_annotations", help="Remove annotations")
+    add_single_input(remove_annotations)
+    remove_annotations.add_argument(
+        "--pages", default="", help="comma-separated 1-indexed pages; default: all"
+    )
+    remove_annotations.add_argument(
+        "--subtypes", default="", help="comma-separated subtypes to remove; default: all"
+    )
+
     return parser
 
 
@@ -144,6 +204,47 @@ def _build_kwargs(args: argparse.Namespace) -> dict[str, object]:
         return {"password": args.password}
     if tool_id == "watermark":
         return {"text": args.text, "opacity": args.opacity, "font_size": args.font_size}
+    if tool_id == "crop":
+        return {
+            "margin_top": args.margin_top,
+            "margin_right": args.margin_right,
+            "margin_bottom": args.margin_bottom,
+            "margin_left": args.margin_left,
+            "pages": _parse_int_list(args.pages),
+        }
+    if tool_id == "resize":
+        return {"width": args.width, "height": args.height, "pages": _parse_int_list(args.pages)}
+    if tool_id == "n_up":
+        return {
+            "pages_per_sheet": args.pages_per_sheet,
+            "sheet_width": args.sheet_width,
+            "sheet_height": args.sheet_height,
+        }
+    if tool_id == "grayscale":
+        return {"pages": _parse_int_list(args.pages), "dpi": args.dpi}
+    if tool_id == "header_footer":
+        return {
+            "header_text": args.header_text,
+            "footer_text": args.footer_text,
+            "font_size": args.font_size,
+            "pages": _parse_int_list(args.pages),
+        }
+    if tool_id == "bates_numbering":
+        return {
+            "prefix": args.prefix,
+            "start": args.start,
+            "digits": args.digits,
+            "position": args.position,
+            "font_size": args.font_size,
+            "pages": _parse_int_list(args.pages),
+        }
+    if tool_id == "flatten":
+        return {"pages": _parse_int_list(args.pages)}
+    if tool_id == "remove_annotations":
+        return {
+            "pages": _parse_int_list(args.pages),
+            "subtypes": [s.strip() for s in args.subtypes.split(",") if s.strip()],
+        }
     raise AssertionError(f"unhandled tool_id: {tool_id}")  # unreachable - argparse validates choices
 
 

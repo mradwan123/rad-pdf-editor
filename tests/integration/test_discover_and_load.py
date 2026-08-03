@@ -1,5 +1,6 @@
 """Integration test: discover_and_load registers every first-party
-Phase 1 plugin, and each one can actually build+run an Operation."""
+Phase 1 + Phase 2 plugin, and each one can actually build+run an
+Operation."""
 
 from __future__ import annotations
 
@@ -23,6 +24,14 @@ EXPECTED_TOOL_IDS = {
     "protect",
     "unlock",
     "watermark",
+    "crop",
+    "resize",
+    "n_up",
+    "grayscale",
+    "header_footer",
+    "bates_numbering",
+    "flatten",
+    "remove_annotations",
 }
 
 

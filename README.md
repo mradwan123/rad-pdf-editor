@@ -10,14 +10,21 @@ anywhere in the codebase.
 
 ## Status
 
-**Phase 1 — MVP ops (in progress).** Core interfaces (`Operation`,
+**Phase 1 — MVP ops: done.** Core interfaces (`Operation`,
 `DocumentSession`, `Pipeline`, plugin `Registry`) are frozen and
-tested. First-party operations implemented so far: Merge,
-Split/Extract, Organize (reorder), Rotate, Delete Pages, Compress,
-Metadata (incl. creation/mod dates), Rename, Protect/Unlock,
-Watermark — all registered via `discover_and_load` and covered by
-unit + integration tests. A minimal CLI (`python -m cli.main`) exposes
-all of them.
+tested. First-party operations: Merge, Split/Extract, Organize
+(reorder), Rotate, Delete Pages, Compress, Metadata (incl. creation/mod
+dates), Rename, Protect/Unlock, Watermark.
+
+**Phase 2 — Forms & layout ops: 8 of the list done.** Crop, Resize,
+N-up, Grayscale (rasterizes affected pages — see
+`core/ops/layout.py`'s module docstring for the tradeoff), Header/Footer,
+Bates/page numbering, Flatten, Remove Annotations. Not yet built from
+Phase 2: Fill & Sign, Create Forms.
+
+All 19 operations are registered via `discover_and_load`, covered by
+unit + integration tests, and exposed as both CLI subcommands
+(`python -m cli.main`) and GUI Tools-menu dialogs.
 
 Session/security infrastructure is in place: a private per-session
 temp directory (`core/session/session_dir.py`), secure multi-pass
@@ -57,9 +64,9 @@ pip install -e ".[dev]"
 ## Development
 
 ```bash
-ruff check .      # lint
-mypy core         # strict type-check on core/
-pytest            # tests
+ruff check .          # lint
+mypy core cli gui     # strict type-check on core/cli, relaxed on gui
+pytest                # tests (set QT_QPA_PLATFORM=offscreen if headless)
 ```
 
 ## Documentation
