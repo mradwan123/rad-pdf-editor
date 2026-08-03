@@ -40,10 +40,11 @@ unit-testable without a display server; `tests/integration/test_gui_smoke.py`
 drives the whole window headlessly (open, apply an op, undo/redo,
 save, close) via `QT_QPA_PLATFORM=offscreen`.
 
-Not yet built: drag-and-drop page reordering in the thumbnail grid
-(reorder currently takes a typed permutation), a pipeline/Workflow
-builder UI, and `gui/styles.qss` (SPEC.md 6.2's shared stylesheet -
-currently just the bare Fusion style).
+Pages can be reordered by dragging thumbnails directly in the grid
+(applies a real `ReorderPagesOperation`, undoable like everything
+else), in addition to the typed-permutation dialog under Tools.
+
+Not yet built: a pipeline/Workflow builder UI (Phase 5).
 
 ## Setup
 

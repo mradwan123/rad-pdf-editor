@@ -16,6 +16,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pikepdf
 import pytest
+from PySide6.QtCore import QModelIndex
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
 from gui.dialogs.merge_dialog import MergeDialog
@@ -107,6 +109,30 @@ def test_open_render_undo_redo_save_close(qapp: QApplication, tmp_path: Path) ->
     working_dir = window.controller.doc.working_path.parent
     window.close()
     assert not working_dir.exists()
+
+
+def test_dragging_a_thumbnail_reorders_the_document(qapp: QApplication, tmp_path: Path) -> None:
+    # model().moveRow(...) triggers the exact same rowsMoved signal a
+    # real mouse drag-and-drop would - InternalMove drag gestures
+    # aren't reliably simulatable headlessly, but this exercises the
+    # real signal-handling code path, not a hand-rolled substitute.
+    src = _make_pdf(tmp_path / "src.pdf", 4)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+
+    moved = window.thumbnail_list.model().moveRow(QModelIndex(), 3, QModelIndex(), 0)
+    assert moved
+    QTest.qWait(50)  # let the QTimer.singleShot(0, ...) deferral run
+
+    assert len(window.controller.doc.operation_log) == 1
+    applied = window.controller.doc.operation_log[-1].serialize()
+    assert applied["type"] == "reorder_pages"
+    assert applied["page_order"] == [4, 1, 2, 3]
+    assert window.undo_action.isEnabled()
+    with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
+        assert len(pdf.pages) == 4
+    window.close()
 
 
 def test_tool_actions_disabled_without_open_document_except_merge(qapp: QApplication) -> None:

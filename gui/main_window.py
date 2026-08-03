@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
@@ -84,6 +84,13 @@ class MainWindow(QMainWindow):
         self.thumbnail_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.thumbnail_list.setMovement(QListWidget.Movement.Static)
         self.thumbnail_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        # Drag-and-drop page reordering: Qt's own InternalMove handles
+        # the drag gesture and visual reordering; rowsMoved tells us
+        # when a drop actually changed the order so we can apply the
+        # corresponding ReorderPagesOperation (see _on_thumbnails_reordered).
+        self.thumbnail_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.thumbnail_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.thumbnail_list.model().rowsMoved.connect(self._on_thumbnails_reordered)
 
         self.empty_state = self._build_empty_state()
 
@@ -294,7 +301,38 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(
                 QIcon(QPixmap.fromImage(page_image)), self.tr("Page {0}").format(i + 1)
             )
+            # Tracks which page this item represents in the *current*
+            # working document, independent of drag position - read
+            # back in visual order by _apply_thumbnail_reorder to
+            # build the ReorderPagesOperation's page_order.
+            item.setData(Qt.ItemDataRole.UserRole, i + 1)
             self.thumbnail_list.addItem(item)
+
+    def _on_thumbnails_reordered(self, *args: object) -> None:
+        # Deferred to the next event loop turn: applying an operation
+        # (which rebuilds thumbnail_list via _refresh) from directly
+        # inside the model's own rowsMoved signal would fight with
+        # Qt's own post-move bookkeeping for the same signal - the
+        # standard-idiom fix is to let the current emission finish
+        # first (see QTimer.singleShot(0, ...)).
+        QTimer.singleShot(0, self._apply_thumbnail_reorder)
+
+    def _apply_thumbnail_reorder(self) -> None:
+        page_order = [
+            self.thumbnail_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self.thumbnail_list.count())
+        ]
+        try:
+            plugin = self.controller.get_plugin("reorder_pages")
+            operation = plugin.build_operation(page_order=page_order)
+            self.controller.apply_operation(operation)
+        except PDFEditorError as exc:
+            self._show_error(exc)
+        # Refresh either way: on success this rebuilds thumbnails from
+        # the new document (confirming the drag), on failure it
+        # discards the stale drag-and-drop visual order so the grid
+        # matches the actual (unchanged) document again.
+        self._refresh()
 
     def _update_action_state(self) -> None:
         is_open = self.controller.is_open

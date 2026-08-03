@@ -171,6 +171,21 @@ CI (`.github/workflows/ci.yml`) now runs `mypy core cli gui` and sets
   run doesn't prove a UI actually looks right (it caught the
   transparent-thumbnail bug above, which no assertion had covered).
 
-Not yet built from the Phase 1 GUI wishlist: drag-and-drop page
-reordering (Reorder currently takes a typed permutation) and a
-pipeline/Workflow builder UI (that's Phase 5).
+**Drag-and-drop page reordering** is implemented: `thumbnail_list` uses
+`QListWidget.DragDropMode.InternalMove`; `MainWindow._on_thumbnails_reordered`
+is connected to the model's `rowsMoved` signal and defers to
+`_apply_thumbnail_reorder` via `QTimer.singleShot(0, ...)` (applying an
+operation - which rebuilds the list via `_refresh()` - synchronously
+from inside `rowsMoved` itself would fight Qt's own post-move
+bookkeeping for that same signal). Each thumbnail's `Qt.ItemDataRole.UserRole`
+holds which page it represents in the *current* document; reading that
+back in visual order after a drop gives `ReorderPagesOperation`'s
+`page_order`. Headless test note: real mouse drag-and-drop gestures
+aren't reliably simulatable under `offscreen` - the test
+(`test_dragging_a_thumbnail_reorders_the_document`) instead calls
+`model().moveRow(...)` directly, which emits the identical `rowsMoved`
+signal a real drag would, exercising the actual handler rather than a
+hand-rolled substitute.
+
+Not yet built from the Phase 1 GUI wishlist: a pipeline/Workflow
+builder UI (that's Phase 5).
