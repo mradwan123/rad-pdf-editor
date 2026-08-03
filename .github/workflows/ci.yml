@@ -28,8 +28,13 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
-      - name: Type check (mypy --strict on core/registry/plugins)
-        run: mypy core
+      - name: Type check (mypy --strict on core/registry/plugins, relaxed on gui)
+        run: mypy core cli gui
 
       - name: Test (pytest)
+        env:
+          # PySide6/QtPdf need a platform plugin; offscreen works
+          # headlessly on all 3 OSes without requiring a real display
+          # or a separate Xvfb step.
+          QT_QPA_PLATFORM: offscreen
         run: pytest

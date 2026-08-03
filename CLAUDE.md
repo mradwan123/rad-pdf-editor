@@ -112,6 +112,38 @@ exposes all 11 as subcommands.
 `PDFEDITOR_APP_DATA_DIR` env var override, so tests (and anyone else)
 can redirect all of the above away from the real per-OS location.
 
-Still open from the Phase 1 list (SPEC.md section 4): the basic
-thumbnail UI + undo/redo wired to the framework in `gui/` - nothing in
-`gui/` exists yet beyond the empty package marker.
+**GUI exists now** (`python -m gui.main`), closing out the last Phase 1
+item ("basic thumbnail UI + undo/redo wired to the framework"):
+- `gui/controller.py` — `AppController`, Qt-free session/document glue
+  (registry, `SessionTempDir`, `AutosaveJournal`, `AuditLog`,
+  `DocumentSession`). Unit-tested directly, no display server needed
+  (`tests/unit/test_gui_controller.py`).
+- `gui/main_window.py` — `MainWindow`: thumbnail grid (`QtPdf` render),
+  File/Edit/Tools menus + toolbar, Undo/Redo, error dialogs.
+- `gui/dialogs/base_tool_dialog.py` — `BaseToolDialog`, the shared
+  dialog shell every tool dialog subclasses (SPEC.md 6.2). One
+  dialog per tool_id in `gui/dialogs/`.
+- `gui/main.py` — entry point; Qt Fusion style app-wide, wraps the
+  whole app lifetime in `network_lockdown()`.
+- `tests/integration/test_gui_smoke.py` — drives the real `MainWindow`
+  headlessly (`QT_QPA_PLATFORM=offscreen`): open a PDF, apply an
+  operation via the actual dialog flow (mocking only `QDialog.exec`
+  itself, not the business logic), undo/redo, save, close, confirm
+  secure session cleanup.
+
+A `MergeOperation.apply()`-without-any-open-document edge case was
+caught and fixed here: `allocate_working_path` (core/ops/common.py)
+derives its output dir from `doc.working_path.parent`, so
+`AppController.apply_operation` must point a fresh, empty
+`DocumentSession.working_path` at the new session dir *before*
+calling `apply()`, or Merge would silently fall back to the OS system
+temp dir instead of the private session dir.
+
+CI (`.github/workflows/ci.yml`) now runs `mypy core cli gui` and sets
+`QT_QPA_PLATFORM=offscreen` for the pytest step on all 3 OSes.
+
+Not yet built from the Phase 1 GUI wishlist: drag-and-drop page
+reordering (Reorder currently takes a typed permutation), a
+pipeline/Workflow builder UI (that's Phase 5), and `gui/styles.qss`
+(SPEC.md 6.2's shared stylesheet - currently just the bare Fusion
+style, no custom spacing/typography pass yet).
