@@ -54,7 +54,11 @@ class SignDialog(BaseToolDialog):
 
     def _choose_image(self) -> None:
         path_str, _selected_filter = QFileDialog.getOpenFileName(
-            self, self.tr("Choose signature image"), "", self.tr("Images (*.png *.jpg *.jpeg)")
+            self,
+            self.tr("Choose signature image"),
+            "",
+            self.tr("Images (*.png *.jpg *.jpeg)"),
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if path_str:
             self._image_path = Path(path_str)

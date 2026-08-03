@@ -22,6 +22,7 @@ from core.ops.common import (
     next_session,
     open_pdf,
     read_working_bytes,
+    resolve_page_targets,
     snapshot_restore_invert,
 )
 from core.registry.plugin_base import ToolPlugin
@@ -33,14 +34,6 @@ _MARGIN = 24.0  # points from the page edge
 def _require_working_pdf(doc: DocumentSession) -> None:
     if doc.working_path is None:
         raise OperationError("No document open.")
-
-
-def _resolve_targets(pages: list[int], total: int) -> list[int]:
-    targets = pages or list(range(1, total + 1))
-    for n in targets:
-        if not (1 <= n <= total):
-            raise OperationError(f"Page {n} is out of range (document has {total} pages).")
-    return targets
 
 
 def _stamp_page(width: float, height: float, draw: Callable[[canvas.Canvas], None]) -> pikepdf.Pdf:
@@ -76,7 +69,7 @@ class HeaderFooterOperation(Operation):
         out_path = allocate_working_path(doc)
         with open_pdf(doc.working_path) as pdf:
             total = len(pdf.pages)
-            targets = _resolve_targets(self.pages, total)
+            targets = resolve_page_targets(self.pages, total)
             for n in targets:
                 page = pdf.pages[n - 1]
                 box = [float(x) for x in page.mediabox]
@@ -155,7 +148,7 @@ class BatesNumberingOperation(Operation):
         out_path = allocate_working_path(doc)
         with open_pdf(doc.working_path) as pdf:
             total = len(pdf.pages)
-            targets = sorted(_resolve_targets(self.pages, total))
+            targets = resolve_page_targets(self.pages, total)  # already ascending + deduped
             draw_fn = _BATES_POSITIONS[self.position]
             for offset, n in enumerate(targets):
                 page = pdf.pages[n - 1]

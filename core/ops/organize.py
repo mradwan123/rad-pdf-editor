@@ -29,6 +29,7 @@ from core.ops.common import (
     next_session,
     open_pdf,
     read_working_bytes,
+    resolve_page_targets,
     snapshot_restore_invert,
 )
 from core.registry.plugin_base import ToolPlugin
@@ -102,10 +103,8 @@ class RotatePagesOperation(Operation):
         out_path = allocate_working_path(doc)
         with open_pdf(doc.working_path) as pdf:
             total = len(pdf.pages)
-            targets = self.pages or list(range(1, total + 1))
+            targets = resolve_page_targets(self.pages, total)
             for n in targets:
-                if not (1 <= n <= total):
-                    raise OperationError(f"Page {n} is out of range (document has {total} pages).")
                 pdf.pages[n - 1].rotate(self.angle, relative=True)
             pdf.save(out_path)
 

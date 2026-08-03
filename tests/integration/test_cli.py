@@ -91,3 +91,32 @@ def test_session_temp_dir_is_cleaned_up_after_run(tmp_path: Path) -> None:
 
     sessions_dir = app_data_dir() / "sessions"
     assert not sessions_dir.exists() or list(sessions_dir.iterdir()) == []
+
+
+def test_missing_input_file_fails_cleanly_not_a_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Regression: a nonexistent --input path used to propagate an
+    # unhandled FileNotFoundError (shutil.copyfile isn't a
+    # PDFEditorError) instead of the CLI's normal "Error: ..." message.
+    out = tmp_path / "out.pdf"
+    exit_code = main(
+        ["rotate_pages", str(tmp_path / "does-not-exist.pdf"), "-o", str(out), "--angle", "90"]
+    )
+    assert exit_code == 1
+    assert "Error:" in capsys.readouterr().err
+
+
+def test_malformed_pages_argument_fails_cleanly_not_a_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Regression: a non-numeric --pages value used to propagate an
+    # unhandled ValueError from _parse_int_list instead of a clean
+    # CLI error.
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    out = tmp_path / "out.pdf"
+    exit_code = main(
+        ["rotate_pages", str(src), "-o", str(out), "--angle", "90", "--pages", "abc"]
+    )
+    assert exit_code == 1
+    assert "Error:" in capsys.readouterr().err

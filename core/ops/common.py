@@ -70,6 +70,30 @@ def next_session(doc: DocumentSession, working_path: Path | None) -> DocumentSes
     )
 
 
+def resolve_page_targets(pages: list[int], total: int) -> list[int]:
+    """Resolve a user-supplied 1-indexed page list against a document
+    of `total` pages: empty means "every page", every entry is range-
+    checked, and the result is deduplicated and returned in ascending
+    order.
+
+    The dedup matters: without it, `pages=[1, 1]` would silently apply
+    a per-page operation (rotate, crop, watermark stamp, page number,
+    ...) to page 1 twice - a real bug found in review, not a
+    hypothetical one (confirmed: RotatePagesOperation with
+    pages=[1, 1] and angle=90 produced a 180-degree rotation). Every
+    op that takes a `pages` list should resolve it through this
+    function rather than rolling its own - four separate near-identical
+    copies of this logic already existed before this fix, each with
+    the same gap.
+    """
+    if not pages:
+        return list(range(1, total + 1))
+    for n in pages:
+        if not (1 <= n <= total):
+            raise OperationError(f"Page {n} is out of range (document has {total} pages).")
+    return sorted(set(pages))
+
+
 def new_working_copy(doc: DocumentSession, data: bytes, suffix: str = ".pdf") -> Path:
     """Write `data` to a fresh file in the session's temp directory and
     return its path. See `allocate_working_path` for the no-content

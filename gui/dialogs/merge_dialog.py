@@ -48,7 +48,11 @@ class MergeDialog(BaseToolDialog):
 
     def _add_files(self) -> None:
         paths, _filter = QFileDialog.getOpenFileNames(
-            self, self.tr("Select PDFs to merge"), "", self.tr("PDF files (*.pdf)")
+            self,
+            self.tr("Select PDFs to merge"),
+            "",
+            self.tr("PDF files (*.pdf)"),
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         self.file_list.addItems(paths)
 

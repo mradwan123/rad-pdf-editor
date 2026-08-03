@@ -74,6 +74,15 @@ def test_crop_undo_restores_original_mediabox(tmp_path: Path) -> None:
     assert _mediabox(restored.working_path) == [0.0, 0.0, 300.0, 400.0]
 
 
+def test_crop_duplicate_page_numbers_apply_once_not_twice(tmp_path: Path) -> None:
+    # Regression: pages=[1, 1] previously cropped page 1 twice
+    # (40pt off the top instead of 20) because nothing deduplicated
+    # the target list.
+    doc = _session(tmp_path, page_size=(300, 400))
+    result = doc.apply(CropOperation(margin_top=20, pages=[1, 1]))
+    assert _mediabox(result.working_path) == [0.0, 0.0, 300.0, 380.0]
+
+
 # --- Resize -------------------------------------------------------------
 
 

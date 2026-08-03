@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pikepdf
 import pytest
-from PySide6.QtCore import QModelIndex
+from PySide6.QtCore import QModelIndex, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
@@ -360,4 +360,48 @@ def test_sign_via_tools_menu_places_image(qapp: QApplication, tmp_path: Path) ->
     with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
         assert len(pdf.pages) == 1
     assert window.undo_action.isEnabled()
+    window.close()
+
+
+def test_refresh_does_not_leak_qpdfdocument_instances(qapp: QApplication, tmp_path: Path) -> None:
+    # Regression: _render_thumbnails used to parent its throwaway
+    # QPdfDocument to `self` (MainWindow), so every _refresh() (every
+    # applied operation, undo, or redo) leaked one instance for the
+    # life of the window instead of being freed after rendering.
+    from PySide6.QtPdf import QPdfDocument
+
+    from core.ops.organize import RotatePagesOperation
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+
+    before = len([c for c in window.children() if isinstance(c, QPdfDocument)])
+    for _ in range(5):
+        window.controller.apply_operation(RotatePagesOperation(angle=90))
+        window._refresh()
+    after = len([c for c in window.children() if isinstance(c, QPdfDocument)])
+
+    assert after == before
+    window.close()
+
+
+def test_reordering_to_the_same_order_does_not_record_a_no_op_operation(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    # Regression: dragging (or a duplicate rowsMoved signal for the
+    # same gesture) that results in the identity order previously
+    # still pushed a no-op ReorderPagesOperation onto the undo stack.
+    src = _make_pdf(tmp_path / "src.pdf", 3)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+    ops_before = len(window.controller.doc.operation_log)
+
+    for i in range(window.thumbnail_list.count()):
+        window.thumbnail_list.item(i).setData(Qt.ItemDataRole.UserRole, i + 1)
+    window._apply_thumbnail_reorder()
+
+    assert len(window.controller.doc.operation_log) == ops_before
     window.close()

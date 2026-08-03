@@ -134,3 +134,14 @@ def test_bates_only_numbers_selected_pages_in_order(tmp_path: Path) -> None:
     assert texts[0] == "01"
     assert texts[1] == ""
     assert texts[2] == "02"
+
+
+def test_bates_duplicate_page_numbers_stamp_once_not_twice(tmp_path: Path) -> None:
+    # Regression: pages=[1, 1, 2] previously stamped page 1 twice
+    # (overlapping "00001"/"00002") and page 2 got "00003" instead of
+    # "00002", because nothing deduplicated the target list.
+    doc = _session(tmp_path, num_pages=2)
+    result = doc.apply(BatesNumberingOperation(start=1, digits=2, pages=[1, 1, 2]))
+    with pdfplumber.open(result.working_path) as pdf:
+        texts = [page.extract_text() for page in pdf.pages]
+    assert texts == ["01", "02"]

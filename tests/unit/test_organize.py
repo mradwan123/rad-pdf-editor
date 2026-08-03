@@ -79,6 +79,14 @@ def test_rotate_rejects_non_multiple_of_90(tmp_path: Path) -> None:
         doc.apply(RotatePagesOperation(angle=45))
 
 
+def test_rotate_duplicate_page_numbers_apply_once_not_twice(tmp_path: Path) -> None:
+    # Regression: pages=[1, 1] previously rotated page 1 twice (180
+    # instead of 90) because nothing deduplicated the target list.
+    doc = _session_with_pages(tmp_path, 1)
+    result = doc.apply(RotatePagesOperation(angle=90, pages=[1, 1]))
+    assert _rotations(result.working_path) == [90]
+
+
 def test_rotate_undo_restores_orientation(tmp_path: Path) -> None:
     doc = _session_with_pages(tmp_path, 1)
     result = doc.apply(RotatePagesOperation(angle=90))

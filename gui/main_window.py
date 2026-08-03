@@ -217,7 +217,11 @@ class MainWindow(QMainWindow):
 
     def _open_document(self) -> None:
         path_str, _selected_filter = QFileDialog.getOpenFileName(
-            self, self.tr("Open PDF"), "", self.tr("PDF files (*.pdf)")
+            self,
+            self.tr("Open PDF"),
+            "",
+            self.tr("PDF files (*.pdf)"),
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not path_str:
             return
@@ -232,7 +236,11 @@ class MainWindow(QMainWindow):
         if not self.controller.is_open:
             return
         path_str, _selected_filter = QFileDialog.getSaveFileName(
-            self, self.tr("Save PDF As"), "", self.tr("PDF files (*.pdf)")
+            self,
+            self.tr("Save PDF As"),
+            "",
+            self.tr("PDF files (*.pdf)"),
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not path_str:
             return
@@ -316,7 +324,13 @@ class MainWindow(QMainWindow):
         self._update_action_state()
 
     def _render_thumbnails(self, path: Path) -> None:
-        pdf_doc = QPdfDocument(self)
+        # No parent: this is a short-lived, throwaway document used
+        # only to render thumbnails for this one _refresh() call. A
+        # `self`-parented QPdfDocument would live as long as
+        # MainWindow itself - confirmed via review to leak one
+        # instance per call (every operation/undo/redo triggers a
+        # _refresh()), unbounded over a session.
+        pdf_doc = QPdfDocument()
         if pdf_doc.load(str(path)) != QPdfDocument.Error.None_:
             log.error("Could not load PDF for thumbnail rendering: %s", path)
             return
@@ -356,6 +370,14 @@ class MainWindow(QMainWindow):
             self.thumbnail_list.item(i).data(Qt.ItemDataRole.UserRole)
             for i in range(self.thumbnail_list.count())
         ]
+        if page_order == list(range(1, len(page_order) + 1)):
+            # No actual change (e.g. a drag that ends where it started,
+            # or - for a multi-item drag - a second rowsMoved signal
+            # for the same gesture arriving after the first one already
+            # applied the reorder and _refresh() reset everything to
+            # sequential order). Applying here would push a no-op
+            # ReorderPagesOperation onto the undo stack for nothing.
+            return
         try:
             plugin = self.controller.get_plugin("reorder_pages")
             operation = plugin.build_operation(page_order=page_order)

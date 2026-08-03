@@ -318,7 +318,14 @@ def main(argv: list[str] | None = None) -> int:
             AuditLog().record_operation(operation, document_label=str(args.output))
             print(f"{operation.describe()} -> {args.output}")
             return 0
-        except PDFEditorError as exc:
+        except (PDFEditorError, OSError, ValueError) as exc:
+            # OSError covers a missing/unreadable --input or a
+            # write-protected --output (shutil.copyfile); ValueError
+            # covers malformed --pages/--field/--rect values (the
+            # _parse_* helpers above). Both used to crash with a raw
+            # Python traceback instead of a clean CLI error - found in
+            # review, confirmed reproducible with a nonexistent input
+            # path and with --pages "abc".
             log.error("CLI operation failed: %s", exc)
             print(f"Error: {exc}", file=sys.stderr)
             return 1

@@ -32,6 +32,16 @@ _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 _original_connect = socket.socket.connect
 _original_connect_ex = socket.socket.connect_ex
 
+#: Depth counter so nested `with network_lockdown():` blocks compose
+#: correctly - found in review: without this, the *inner* block's exit
+#: restored the true original connect/connect_ex, silently disabling
+#: protection for the still-running outer block instead of leaving it
+#: active until the outermost block exits. Only current usage is
+#: single-level (cli/main.py, gui/main.py), so this was latent, not
+#: yet triggered in the shipped app - fixed anyway since this is
+#: security-relevant code and a plausible future misuse.
+_lockdown_depth = 0
+
 
 def _is_loopback(address: Any) -> bool:
     if isinstance(address, tuple) and address:
@@ -57,13 +67,19 @@ def _guarded_connect_ex(self: socket.socket, address: Any) -> int:
 @contextlib.contextmanager
 def network_lockdown() -> Iterator[None]:
     """Block outbound (non-loopback) socket connections for the
-    duration of the `with` block, in this process only."""
-    socket.socket.connect = _guarded_connect  # type: ignore[method-assign, assignment]
-    socket.socket.connect_ex = _guarded_connect_ex  # type: ignore[method-assign, assignment]
-    log.info("Network lockdown enabled")
+    duration of the `with` block, in this process only. Safe to nest -
+    only the outermost block installs/removes the patch."""
+    global _lockdown_depth
+    if _lockdown_depth == 0:
+        socket.socket.connect = _guarded_connect  # type: ignore[method-assign, assignment]
+        socket.socket.connect_ex = _guarded_connect_ex  # type: ignore[method-assign, assignment]
+        log.info("Network lockdown enabled")
+    _lockdown_depth += 1
     try:
         yield
     finally:
-        socket.socket.connect = _original_connect  # type: ignore[method-assign]
-        socket.socket.connect_ex = _original_connect_ex  # type: ignore[method-assign]
-        log.info("Network lockdown disabled")
+        _lockdown_depth -= 1
+        if _lockdown_depth == 0:
+            socket.socket.connect = _original_connect  # type: ignore[method-assign]
+            socket.socket.connect_ex = _original_connect_ex  # type: ignore[method-assign]
+            log.info("Network lockdown disabled")
