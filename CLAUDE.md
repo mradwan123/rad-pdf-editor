@@ -142,8 +142,35 @@ temp dir instead of the private session dir.
 CI (`.github/workflows/ci.yml`) now runs `mypy core cli gui` and sets
 `QT_QPA_PLATFORM=offscreen` for the pytest step on all 3 OSes.
 
+**Branding/theme pass** (SPEC.md 6.2's `styles.qss` is built now):
+- `gui/styles.qss` — dark silver/gray/black theme, applied app-wide.
+- `gui/palette.py` — `build_dark_palette()`, a `QPalette` applied via
+  `app.setPalette()` *before* the stylesheet. This is load-bearing,
+  not decoration: QSS alone did not reliably drive
+  `QListWidget`'s IconMode selection highlight (it fell back to the
+  OS default blue) - the fix was setting `QPalette::Highlight` in
+  code, the standard approach for theming Fusion. Don't try to move
+  that color into `styles.qss` alone without re-checking this.
+- `gui/resources.py` — the "Rad PDF Editor" mark (`build_app_icon`,
+  `build_logo_pixmap`), drawn with `QPainter` rather than a checked-in
+  binary asset, themed to match the palette.
+- App name is "Rad PDF Editor" (`gui/main_window.py`'s `_APP_NAME`) -
+  the window title, taskbar icon, and the empty-state welcome screen
+  (`MainWindow._build_empty_state`, shown via a `QStackedWidget`
+  instead of the thumbnail grid when no document is open) all use it.
+  The underlying project/package name is unchanged (this was scoped
+  as a GUI branding request, not a project rename).
+- Also fixed in this pass: `QPdfDocument.render()` leaves any
+  unpainted area of a page fully transparent (alpha=0) rather than
+  opaque white, invisible on blank/near-empty pages regardless of
+  theme. `MainWindow._render_thumbnails` now composites onto a white
+  backdrop before building the `QIcon`.
+- Verified visually, not just by test pass/fail: rendered the real
+  `MainWindow`/dialogs to PNG via `widget.grab()` under
+  `QT_QPA_PLATFORM=offscreen` and viewed them, since a clean pytest
+  run doesn't prove a UI actually looks right (it caught the
+  transparent-thumbnail bug above, which no assertion had covered).
+
 Not yet built from the Phase 1 GUI wishlist: drag-and-drop page
-reordering (Reorder currently takes a typed permutation), a
-pipeline/Workflow builder UI (that's Phase 5), and `gui/styles.qss`
-(SPEC.md 6.2's shared stylesheet - currently just the bare Fusion
-style, no custom spacing/typography pass yet).
+reordering (Reorder currently takes a typed permutation) and a
+pipeline/Workflow builder UI (that's Phase 5).

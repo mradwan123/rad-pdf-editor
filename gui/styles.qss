@@ -1,0 +1,233 @@
+/* Shared stylesheet - SPEC.md 6.2: "consistency across dialogs comes
+ * from ... a shared styles.qss stylesheet for spacing/typography, not
+ * per-dialog styling." Applied once, app-wide, on top of the Qt
+ * Fusion base style (gui/main.py). Silver / gray / black palette. */
+
+* {
+    color: #e8e9eb;
+    selection-background-color: #565963;
+    selection-color: #f2f3f5;
+}
+
+QMainWindow, QDialog, QWidget {
+    background-color: #1b1c1e;
+}
+
+QMenuBar {
+    background-color: #202124;
+    border-bottom: 1px solid #333438;
+    padding: 2px;
+}
+
+QMenuBar::item {
+    background: transparent;
+    padding: 4px 10px;
+    border-radius: 3px;
+}
+
+QMenuBar::item:selected {
+    background-color: #34363b;
+}
+
+QMenu {
+    background-color: #232427;
+    border: 1px solid #3a3b40;
+    padding: 4px;
+}
+
+QMenu::item {
+    padding: 5px 24px 5px 12px;
+    border-radius: 3px;
+}
+
+QMenu::item:selected {
+    background-color: #3a3d44;
+}
+
+QMenu::item:disabled {
+    color: #5c5d63;
+}
+
+QMenu::separator {
+    height: 1px;
+    background: #35363b;
+    margin: 4px 6px;
+}
+
+QToolBar {
+    background-color: #202124;
+    border-bottom: 1px solid #333438;
+    padding: 3px;
+    spacing: 4px;
+}
+
+QToolButton {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+
+QToolButton:hover {
+    background-color: #303237;
+    border-color: #45474d;
+}
+
+QToolButton:pressed {
+    background-color: #26282c;
+}
+
+QToolButton:disabled {
+    color: #5c5d63;
+}
+
+QStatusBar {
+    background-color: #202124;
+    border-top: 1px solid #333438;
+    color: #9a9ca3;
+}
+
+QPushButton {
+    background-color: #2e3035;
+    border: 1px solid #45474d;
+    border-radius: 4px;
+    padding: 6px 16px;
+    min-width: 64px;
+}
+
+QPushButton:hover {
+    background-color: #383a40;
+    border-color: #5a5c64;
+}
+
+QPushButton:pressed {
+    background-color: #222327;
+}
+
+QPushButton:disabled {
+    background-color: #232427;
+    border-color: #33343a;
+    color: #5c5d63;
+}
+
+QPushButton:default {
+    border-color: #8b8f99;
+}
+
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+    background-color: #17181a;
+    border: 1px solid #3a3b40;
+    border-radius: 3px;
+    padding: 4px 6px;
+    selection-background-color: #565963;
+}
+
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
+    border-color: #8b8f99;
+}
+
+QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
+    background-color: #1e1f22;
+    color: #5c5d63;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #232427;
+    border: 1px solid #3a3b40;
+    selection-background-color: #3a3d44;
+    outline: none;
+}
+
+QListWidget {
+    background-color: #17181a;
+    border: 1px solid #2a2b2f;
+    outline: none;
+}
+
+QListWidget::item {
+    background-color: #202124;
+    border: 1px solid #2f3034;
+    border-radius: 4px;
+    margin: 6px;
+    padding: 6px;
+    color: #c7cad1;
+}
+
+QListWidget::item:hover {
+    border-color: #4a4c53;
+}
+
+QListWidget::item:selected {
+    background-color: #2a2c31;
+    border-color: #8b8f99;
+    color: #f2f3f5;
+}
+
+QLabel {
+    background: transparent;
+}
+
+#emptyState {
+    background-color: #1b1c1e;
+}
+
+#emptyStateTitle {
+    font-size: 20pt;
+    font-weight: 600;
+    color: #e8e9eb;
+}
+
+#emptyStateSubtitle {
+    font-size: 10pt;
+    color: #8a8c93;
+}
+
+QScrollBar:vertical {
+    background: #1b1c1e;
+    width: 12px;
+    margin: 0;
+}
+
+QScrollBar::handle:vertical {
+    background: #3a3b40;
+    border-radius: 5px;
+    min-height: 24px;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #4a4c53;
+}
+
+QScrollBar:horizontal {
+    background: #1b1c1e;
+    height: 12px;
+    margin: 0;
+}
+
+QScrollBar::handle:horizontal {
+    background: #3a3b40;
+    border-radius: 5px;
+    min-width: 24px;
+    margin: 2px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: #4a4c53;
+}
+
+QScrollBar::add-line, QScrollBar::sub-line {
+    height: 0;
+    width: 0;
+    border: none;
+    background: none;
+}
+
+QMessageBox {
+    background-color: #232427;
+}

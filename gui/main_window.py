@@ -8,16 +8,20 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSize
-from PySide6.QtGui import QAction, QCloseEvent, QIcon, QPixmap
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QAction, QCloseEvent, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
     QFileDialog,
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPushButton,
+    QStackedWidget,
     QToolBar,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -36,9 +40,11 @@ from gui.dialogs.reorder_pages_dialog import ReorderPagesDialog
 from gui.dialogs.rotate_dialog import RotateDialog
 from gui.dialogs.unlock_dialog import UnlockDialog
 from gui.dialogs.watermark_dialog import WatermarkDialog
+from gui.resources import build_logo_pixmap
 
 log = get_logger(__name__)
 
+_APP_NAME = "Rad PDF Editor"
 _THUMBNAIL_SIZE = QSize(120, 160)
 
 #: Every concrete BaseToolDialog subclass takes (parent=None), a
@@ -66,7 +72,7 @@ _TOOL_DIALOGS: dict[str, _DialogFactory] = {
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(self.tr("PDF Editor"))
+        self.setWindowTitle(_APP_NAME)
         self.resize(900, 700)
 
         self.controller = AppController()
@@ -78,11 +84,49 @@ class MainWindow(QMainWindow):
         self.thumbnail_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.thumbnail_list.setMovement(QListWidget.Movement.Static)
         self.thumbnail_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        self.setCentralWidget(self.thumbnail_list)
+
+        self.empty_state = self._build_empty_state()
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.empty_state)
+        self.stack.addWidget(self.thumbnail_list)
+        self.setCentralWidget(self.stack)
 
         self.tool_actions: dict[str, QAction] = {}
         self._build_actions()
         self._refresh()
+
+    def _build_empty_state(self) -> QWidget:
+        """Branded welcome screen shown in place of the thumbnail grid
+        when no document is open."""
+        widget = QWidget()
+        widget.setObjectName("emptyState")
+
+        logo_label = QLabel()
+        logo_label.setPixmap(build_logo_pixmap(128))
+        logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        title_label = QLabel(_APP_NAME)
+        title_label.setObjectName("emptyStateTitle")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        subtitle_label = QLabel(self.tr("Open a PDF to get started"))
+        subtitle_label.setObjectName("emptyStateSubtitle")
+        subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        open_button = QPushButton(self.tr("Open PDF..."))
+        open_button.clicked.connect(self._open_document)
+
+        layout = QVBoxLayout(widget)
+        layout.addStretch(1)
+        layout.addWidget(logo_label)
+        layout.addSpacing(12)
+        layout.addWidget(title_label)
+        layout.addWidget(subtitle_label)
+        layout.addSpacing(16)
+        layout.addWidget(open_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch(1)
+        return widget
 
     # --- action / menu / toolbar setup ----------------------------------
 
@@ -221,11 +265,13 @@ class MainWindow(QMainWindow):
                 if self.controller.doc.source_path
                 else self.tr("Untitled")
             )
-            self.setWindowTitle(self.tr("PDF Editor - {0}").format(label))
+            self.setWindowTitle(f"{_APP_NAME} - {label}")
             self.statusBar().showMessage(self.tr("{0} page(s)").format(self.thumbnail_list.count()))
+            self.stack.setCurrentWidget(self.thumbnail_list)
         else:
-            self.setWindowTitle(self.tr("PDF Editor"))
+            self.setWindowTitle(_APP_NAME)
             self.statusBar().showMessage(self.tr("No document open"))
+            self.stack.setCurrentWidget(self.empty_state)
         self._update_action_state()
 
     def _render_thumbnails(self, path: Path) -> None:
@@ -234,8 +280,20 @@ class MainWindow(QMainWindow):
             log.error("Could not load PDF for thumbnail rendering: %s", path)
             return
         for i in range(pdf_doc.pageCount()):
-            image = pdf_doc.render(i, _THUMBNAIL_SIZE)
-            item = QListWidgetItem(QIcon(QPixmap.fromImage(image)), self.tr("Page {0}").format(i + 1))
+            rendered = pdf_doc.render(i, _THUMBNAIL_SIZE)
+            # QtPdf leaves any unpainted area of the page fully
+            # transparent (alpha=0) rather than opaque white - most
+            # visible on blank/near-empty pages. Composite onto a
+            # white backdrop so a thumbnail always reads as a page,
+            # not as "nothing" wherever the source PDF painted nothing.
+            page_image = QImage(_THUMBNAIL_SIZE, QImage.Format.Format_ARGB32_Premultiplied)
+            page_image.fill(Qt.GlobalColor.white)
+            painter = QPainter(page_image)
+            painter.drawImage(0, 0, rendered)
+            painter.end()
+            item = QListWidgetItem(
+                QIcon(QPixmap.fromImage(page_image)), self.tr("Page {0}").format(i + 1)
+            )
             self.thumbnail_list.addItem(item)
 
     def _update_action_state(self) -> None:

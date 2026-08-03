@@ -43,6 +43,38 @@ def _make_pdf(path: Path, num_pages: int) -> Path:
     return path
 
 
+def test_starts_on_empty_state_with_branded_title(qapp: QApplication) -> None:
+    window = MainWindow()
+    assert window.windowTitle() == "Rad PDF Editor"
+    assert window.stack.currentWidget() is window.empty_state
+    window.close()
+
+
+def test_opening_a_document_switches_to_thumbnail_view(qapp: QApplication, tmp_path: Path) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    window = MainWindow()
+
+    window.controller.open_document(src)
+    window._refresh()
+
+    assert window.stack.currentWidget() is window.thumbnail_list
+    window.close()
+
+
+def test_closing_document_returns_to_empty_state(qapp: QApplication, tmp_path: Path) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+
+    window.controller.close_session()
+    window._refresh()
+
+    assert window.stack.currentWidget() is window.empty_state
+    assert window.windowTitle() == "Rad PDF Editor"
+    window.close()
+
+
 def test_open_render_undo_redo_save_close(qapp: QApplication, tmp_path: Path) -> None:
     from core.ops.organize import RotatePagesOperation
 

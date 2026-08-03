@@ -9,18 +9,36 @@ section 1 and 2's "Security layer").
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from core.logging_config import configure_logging
+from core.logging_config import configure_logging, get_logger
 from core.security.sandbox import network_lockdown
 from gui.main_window import MainWindow
+from gui.palette import build_dark_palette
+from gui.resources import build_app_icon
+
+log = get_logger(__name__)
+
+_STYLESHEET_PATH = Path(__file__).parent / "styles.qss"
+
+
+def _load_stylesheet() -> str:
+    try:
+        return _STYLESHEET_PATH.read_text(encoding="utf-8")
+    except OSError:
+        log.warning("Could not load stylesheet: %s", _STYLESHEET_PATH)
+        return ""
 
 
 def main() -> int:
     configure_logging()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")  # SPEC.md 6.2: Qt Fusion style, no custom component library
+    app.setPalette(build_dark_palette())  # base colors - QSS alone doesn't reliably drive these
+    app.setStyleSheet(_load_stylesheet())  # SPEC.md 6.2: one shared styles.qss, not per-dialog
+    app.setWindowIcon(build_app_icon())
     window = MainWindow()
     window.show()
     with network_lockdown():

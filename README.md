@@ -27,8 +27,12 @@ recovery journal (`core/session/autosave.py`), and a defense-in-depth
 network lockdown (`core/security/sandbox.py`). Both the CLI and GUI
 are wired to the session dir, network lockdown, and audit log.
 
-A first working GUI exists (`python -m gui.main`): PySide6 + Qt Fusion
-style, a thumbnail page grid (rendered via `QtPdf`), Open/Save As/Close,
+A first working GUI exists (`python -m gui.main`), branded as **Rad
+PDF Editor**: PySide6 + Qt Fusion style, a dark silver/gray/black theme
+(`gui/palette.py` + `gui/styles.qss` — SPEC.md 6.2's shared stylesheet),
+a programmatically-drawn app icon/logo (`gui/resources.py`, no binary
+image assets checked in), a branded empty-state welcome screen, a
+thumbnail page grid (rendered via `QtPdf`), Open/Save As/Close,
 Undo/Redo, and a Tools menu with a dialog for each of the 11
 operations, all subclassing a shared `BaseToolDialog` (SPEC.md 6.2).
 `gui/controller.py` holds the Qt-free session/document glue so it's
