@@ -16,13 +16,17 @@ tested. First-party operations: Merge, Split/Extract, Organize
 (reorder), Rotate, Delete Pages, Compress, Metadata (incl. creation/mod
 dates), Rename, Protect/Unlock, Watermark.
 
-**Phase 2 — Forms & layout ops: 8 of the list done.** Crop, Resize,
-N-up, Grayscale (rasterizes affected pages — see
-`core/ops/layout.py`'s module docstring for the tradeoff), Header/Footer,
-Bates/page numbering, Flatten, Remove Annotations. Not yet built from
-Phase 2: Fill & Sign, Create Forms.
+**Phase 2 — Forms & layout ops: 10 of 11 done.** Crop, Resize, N-up,
+Grayscale (rasterizes affected pages — see `core/ops/layout.py`'s
+module docstring for the tradeoff), Header/Footer, Bates/page
+numbering, Flatten, Remove Annotations, Fill Form, Sign. Fill/Sign are
+visual/data operations (set AcroForm field values; place a signature
+image at a page/rect), not cryptographic signing — see
+`core/ops/forms.py`'s module docstring. Not yet built from Phase 2:
+Create Forms (needs its own field-authoring UI, a different feature
+from filling existing fields).
 
-All 19 operations are registered via `discover_and_load`, covered by
+All 21 operations are registered via `discover_and_load`, covered by
 unit + integration tests, and exposed as both CLI subcommands
 (`python -m cli.main`) and GUI Tools-menu dialogs.
 

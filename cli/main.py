@@ -161,11 +161,48 @@ def _build_parser() -> argparse.ArgumentParser:
         "--subtypes", default="", help="comma-separated subtypes to remove; default: all"
     )
 
+    fill_form = sub.add_parser("fill_form", help="Set AcroForm field values")
+    add_single_input(fill_form)
+    fill_form.add_argument(
+        "--field",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="repeatable, e.g. --field name=Jane --field date=2025-06-03",
+    )
+
+    sign = sub.add_parser("sign", help="Place a signature/initials image on a page")
+    add_single_input(sign)
+    sign.add_argument("--image", type=Path, required=True, help="signature image file")
+    sign.add_argument("--page", type=int, required=True, help="1-indexed target page")
+    sign.add_argument(
+        "--rect",
+        required=True,
+        help="x0,y0,x1,y1 in points, PDF-native origin bottom-left, e.g. 50,50,250,130",
+    )
+
     return parser
 
 
 def _parse_int_list(raw: str) -> list[int]:
     return [int(x) for x in raw.split(",") if x.strip()]
+
+
+def _parse_field_values(raw: list[str]) -> dict[str, str]:
+    fields = {}
+    for item in raw:
+        name, sep, value = item.partition("=")
+        if not sep:
+            raise ValueError(f"--field must be NAME=VALUE, got '{item}'")
+        fields[name] = value
+    return fields
+
+
+def _parse_rect(raw: str) -> tuple[float, float, float, float]:
+    parts = [float(x) for x in raw.split(",")]
+    if len(parts) != 4:
+        raise ValueError(f"--rect must be x0,y0,x1,y1, got '{raw}'")
+    return (parts[0], parts[1], parts[2], parts[3])
 
 
 def _build_kwargs(args: argparse.Namespace) -> dict[str, object]:
@@ -245,6 +282,10 @@ def _build_kwargs(args: argparse.Namespace) -> dict[str, object]:
             "pages": _parse_int_list(args.pages),
             "subtypes": [s.strip() for s in args.subtypes.split(",") if s.strip()],
         }
+    if tool_id == "fill_form":
+        return {"field_values": _parse_field_values(args.field)}
+    if tool_id == "sign":
+        return {"image_path": args.image, "page": args.page, "rect": _parse_rect(args.rect)}
     raise AssertionError(f"unhandled tool_id: {tool_id}")  # unreachable - argparse validates choices
 
 

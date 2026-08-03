@@ -22,8 +22,10 @@ from PySide6.QtWidgets import QApplication, QDialog
 
 from gui.dialogs.bates_numbering_dialog import BatesNumberingDialog
 from gui.dialogs.crop_dialog import CropDialog
+from gui.dialogs.fill_form_dialog import FillFormDialog
 from gui.dialogs.merge_dialog import MergeDialog
 from gui.dialogs.rotate_dialog import RotateDialog
+from gui.dialogs.sign_dialog import SignDialog
 from gui.main_window import MainWindow
 
 
@@ -219,6 +221,8 @@ def test_phase2_tools_are_all_registered_in_the_menu(qapp: QApplication) -> None
         "bates_numbering",
         "flatten",
         "remove_annotations",
+        "fill_form",
+        "sign",
     ):
         assert tool_id in window.tool_actions
     window.close()
@@ -255,5 +259,105 @@ def test_crop_then_bates_numbering_via_tools_menu(qapp: QApplication, tmp_path: 
         assert pdf.pages[1].extract_text() == "DOC-00002"
 
     assert len(window.controller.doc.operation_log) == 2
+    assert window.undo_action.isEnabled()
+    window.close()
+
+
+def _make_pdf_with_text_field(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    page = pdf.add_blank_page(page_size=(300, 400))
+    field = pdf.make_indirect(
+        pikepdf.Dictionary(
+            {
+                "/FT": pikepdf.Name("/Tx"),
+                "/T": pikepdf.String("name"),
+                "/Rect": pikepdf.Array([50, 300, 250, 320]),
+                "/Subtype": pikepdf.Name("/Widget"),
+                "/Type": pikepdf.Name("/Annot"),
+                "/V": pikepdf.String(""),
+                "/DA": pikepdf.String("/Helv 12 Tf 0 g"),
+            }
+        )
+    )
+    page.obj["/Annots"] = pikepdf.Array([field])
+    pdf.Root["/AcroForm"] = pdf.make_indirect(
+        pikepdf.Dictionary(
+            {
+                "/Fields": pikepdf.Array([field]),
+                "/NeedAppearances": True,
+                "/DR": pikepdf.Dictionary(
+                    {
+                        "/Font": pikepdf.Dictionary(
+                            {
+                                "/Helv": pdf.make_indirect(
+                                    pikepdf.Dictionary(
+                                        {
+                                            "/Type": pikepdf.Name("/Font"),
+                                            "/Subtype": pikepdf.Name("/Type1"),
+                                            "/BaseFont": pikepdf.Name("/Helvetica"),
+                                        }
+                                    )
+                                )
+                            }
+                        )
+                    }
+                ),
+            }
+        )
+    )
+    pdf.save(path)
+    return path
+
+
+def test_fill_form_via_tools_menu_uses_detected_field_names(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    import fitz
+
+    src = _make_pdf_with_text_field(tmp_path / "form.pdf")
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+
+    def fake_fill(self: FillFormDialog) -> QDialog.DialogCode:
+        assert "name" in self._inputs
+        self._inputs["name"].setText("Jane Smith")
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(FillFormDialog, "exec", fake_fill):
+        window._run_tool("fill_form", None)
+
+    with fitz.open(window.controller.doc.working_path) as pdf:
+        assert "Jane Smith" in pdf[0].get_text()
+    window.close()
+
+
+def test_sign_via_tools_menu_places_image(qapp: QApplication, tmp_path: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    sig = tmp_path / "sig.png"
+    img = Image.new("RGBA", (200, 80), (0, 0, 0, 0))
+    ImageDraw.Draw(img).line((10, 60, 190, 20), fill=(0, 0, 200, 255), width=6)
+    img.save(sig)
+
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+
+    def fake_sign(self: SignDialog) -> QDialog.DialogCode:
+        self._image_path = sig
+        self.page.setValue(1)
+        self.x0.setValue(50)
+        self.y0.setValue(50)
+        self.x1.setValue(250)
+        self.y1.setValue(130)
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(SignDialog, "exec", fake_sign):
+        window._run_tool("sign", SignDialog)
+
+    with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
+        assert len(pdf.pages) == 1
     assert window.undo_action.isEnabled()
     window.close()

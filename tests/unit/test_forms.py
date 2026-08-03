@@ -1,14 +1,24 @@
-"""Unit tests for core/ops/forms.py (Flatten, Remove Annotations)."""
+"""Unit tests for core/ops/forms.py (Flatten, Remove Annotations, Fill
+Form, Sign)."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import fitz
 import pdfplumber
 import pikepdf
+import pytest
 
+from core.errors import OperationError
 from core.model.document import DocumentSession
-from core.ops.forms import FlattenOperation, RemoveAnnotationsOperation
+from core.ops.forms import (
+    FillFormOperation,
+    FlattenOperation,
+    RemoveAnnotationsOperation,
+    SignOperation,
+    list_form_field_names,
+)
 
 
 def _make_pdf_with_annotation(
@@ -139,3 +149,201 @@ def test_remove_annotations_undo_restores_the_annotation(tmp_path: Path) -> None
     result = doc.apply(RemoveAnnotationsOperation())
     restored = result.undo()
     assert _has_annots(restored.working_path)
+
+
+# --- Fill Form -------------------------------------------------------
+
+
+def _make_pdf_with_text_field(path: Path, field_name: str = "name") -> Path:
+    pdf = pikepdf.Pdf.new()
+    page = pdf.add_blank_page(page_size=(300, 400))
+    field = pdf.make_indirect(
+        pikepdf.Dictionary(
+            {
+                "/FT": pikepdf.Name("/Tx"),
+                "/T": pikepdf.String(field_name),
+                "/Rect": pikepdf.Array([50, 300, 250, 320]),
+                "/Subtype": pikepdf.Name("/Widget"),
+                "/Type": pikepdf.Name("/Annot"),
+                "/V": pikepdf.String(""),
+                "/DA": pikepdf.String("/Helv 12 Tf 0 g"),
+            }
+        )
+    )
+    page.obj["/Annots"] = pikepdf.Array([field])
+    pdf.Root["/AcroForm"] = pdf.make_indirect(
+        pikepdf.Dictionary(
+            {
+                "/Fields": pikepdf.Array([field]),
+                "/NeedAppearances": True,
+                "/DR": pikepdf.Dictionary(
+                    {
+                        "/Font": pikepdf.Dictionary(
+                            {
+                                "/Helv": pdf.make_indirect(
+                                    pikepdf.Dictionary(
+                                        {
+                                            "/Type": pikepdf.Name("/Font"),
+                                            "/Subtype": pikepdf.Name("/Type1"),
+                                            "/BaseFont": pikepdf.Name("/Helvetica"),
+                                        }
+                                    )
+                                )
+                            }
+                        )
+                    }
+                ),
+            }
+        )
+    )
+    pdf.save(path)
+    return path
+
+
+def _form_session(tmp_path: Path, field_name: str = "name") -> DocumentSession:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    working = _make_pdf_with_text_field(session_dir / "working.pdf", field_name)
+    return DocumentSession(working_path=working, source_path=None)
+
+
+def _extracted_text(path: Path) -> str:
+    with fitz.open(path) as pdf:
+        return pdf[0].get_text()
+
+
+def test_list_form_field_names_finds_the_field(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    working = _make_pdf_with_text_field(session_dir / "working.pdf", "name")
+    assert list_form_field_names(working) == ["name"]
+
+
+def test_list_form_field_names_empty_for_document_without_a_form(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    working = session_dir / "working.pdf"
+    pdf.save(working)
+    assert list_form_field_names(working) == []
+
+
+def test_fill_form_sets_value_and_generates_visible_appearance(tmp_path: Path) -> None:
+    doc = _form_session(tmp_path)
+    result = doc.apply(FillFormOperation(field_values={"name": "Jane Smith"}))
+    assert "Jane Smith" in _extracted_text(result.working_path)
+
+
+def test_fill_form_rejects_unknown_field(tmp_path: Path) -> None:
+    doc = _form_session(tmp_path)
+    with pytest.raises(OperationError):
+        doc.apply(FillFormOperation(field_values={"bogus": "x"}))
+
+
+def test_fill_form_rejects_empty_field_values() -> None:
+    with pytest.raises(OperationError):
+        FillFormOperation(field_values={})
+
+
+def test_fill_form_on_document_without_a_form_raises(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    working = session_dir / "working.pdf"
+    pdf.save(working)
+    doc = DocumentSession(working_path=working, source_path=None)
+    with pytest.raises(OperationError):
+        doc.apply(FillFormOperation(field_values={"name": "x"}))
+
+
+def test_fill_form_undo_restores_empty_value(tmp_path: Path) -> None:
+    doc = _form_session(tmp_path)
+    result = doc.apply(FillFormOperation(field_values={"name": "Jane Smith"}))
+    restored = result.undo()
+    assert "Jane Smith" not in _extracted_text(restored.working_path)
+
+
+# --- Sign -------------------------------------------------------
+
+
+def _make_signature_image(path: Path) -> Path:
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGBA", (200, 80), (0, 0, 0, 0))
+    ImageDraw.Draw(img).line((10, 60, 190, 20), fill=(0, 0, 200, 255), width=6)
+    img.save(path)
+    return path
+
+
+def _sign_session(tmp_path: Path) -> DocumentSession:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    pdf.add_blank_page(page_size=(300, 400))
+    working = session_dir / "working.pdf"
+    pdf.save(working)
+    return DocumentSession(working_path=working, source_path=None)
+
+
+def _has_ink(path: Path, page: int = 0) -> bool:
+    with fitz.open(path) as pdf:
+        pix = pdf[page].get_pixmap()
+        samples = pix.samples
+        return any(
+            not (samples[i] == samples[i + 1] == samples[i + 2])
+            for i in range(0, len(samples), pix.n)
+        )
+
+
+def test_sign_places_image_on_the_correct_page(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    sig = _make_signature_image(tmp_path / "sig.png")
+    result = doc.apply(SignOperation(image_path=sig, page=2, rect=(50, 50, 250, 130)))
+    assert not _has_ink(result.working_path, page=0)
+    assert _has_ink(result.working_path, page=1)
+
+
+def test_sign_preserves_page_count(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    sig = _make_signature_image(tmp_path / "sig.png")
+    result = doc.apply(SignOperation(image_path=sig, page=1, rect=(50, 50, 250, 130)))
+    with pikepdf.Pdf.open(result.working_path) as pdf:
+        assert len(pdf.pages) == 2
+
+
+def test_sign_rejects_missing_image(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    with pytest.raises(OperationError):
+        doc.apply(SignOperation(image_path=tmp_path / "missing.png", page=1, rect=(0, 0, 100, 50)))
+
+
+def test_sign_rejects_out_of_range_page(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    sig = _make_signature_image(tmp_path / "sig.png")
+    with pytest.raises(OperationError):
+        doc.apply(SignOperation(image_path=sig, page=99, rect=(0, 0, 100, 50)))
+
+
+def test_sign_rejects_degenerate_rect(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    sig = _make_signature_image(tmp_path / "sig.png")
+    with pytest.raises(OperationError):
+        doc.apply(SignOperation(image_path=sig, page=1, rect=(100, 100, 100, 100)))
+
+
+def test_sign_with_no_document_open_raises(tmp_path: Path) -> None:
+    sig = _make_signature_image(tmp_path / "sig.png")
+    doc = DocumentSession(working_path=None, source_path=None)
+    with pytest.raises(OperationError):
+        doc.apply(SignOperation(image_path=sig, page=1, rect=(0, 0, 100, 50)))
+
+
+def test_sign_undo_removes_the_image(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    sig = _make_signature_image(tmp_path / "sig.png")
+    result = doc.apply(SignOperation(image_path=sig, page=1, rect=(50, 50, 250, 130)))
+    restored = result.undo()
+    assert not _has_ink(restored.working_path, page=0)

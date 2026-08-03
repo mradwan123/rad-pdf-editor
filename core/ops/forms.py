@@ -1,4 +1,5 @@
-"""Flatten and Remove Annotations operations (SPEC.md Phase 2 list).
+"""Flatten, Remove Annotations, Fill Form, and Sign operations
+(SPEC.md Phase 2 list).
 
 Flatten composites each annotation's visual appearance onto the page's
 own content (so it prints/exports identically but is no longer an
@@ -13,13 +14,25 @@ whose /AP /N is a sub-state dictionary (e.g. a checkbox's On/Off
 appearances) are flattened only if /AS names a present sub-state;
 otherwise that single annotation is left as-is rather than guessing -
 this only skips that one annotation, it doesn't fail the operation.
+
+Fill Form and Sign are the "Fill & Sign" pair from SPEC.md's Phase 2
+list. Both are visual/data operations, not cryptographic signing (a
+digital-signature op using pyhanko - already a project dependency -
+would be a distinct future feature). Neither has an interactive
+click-to-place canvas yet (the GUI's thumbnail grid isn't a page
+editor); Fill takes explicit field name/value pairs (see
+`list_form_field_names` for discovering names) and Sign takes an
+explicit page + rect, both things a future interactive canvas would
+compute for the user rather than replace.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import fitz
 import pikepdf
 
 from core.errors import OperationError
@@ -170,6 +183,121 @@ class RemoveAnnotationsOperation(Operation):
         return "Removed annotations"
 
 
+def list_form_field_names(path: Path) -> list[str]:
+    """Every fillable field's fully-qualified name in `path`'s
+    AcroForm - for GUI/CLI discovery before building a
+    `FillFormOperation`. Empty if the document has no form."""
+    with pikepdf.Pdf.open(path) as pdf:
+        af = pdf.acroform
+        if not af.exists:
+            return []
+        return [str(f.fully_qualified_name) for f in af.fields]
+
+
+@dataclass
+class FillFormOperation(Operation):
+    """Sets AcroForm field values from `field_values` (name -> value)
+    and regenerates their appearance streams so the values are visible
+    without relying on the viewer to do it."""
+
+    field_values: dict[str, str]
+    _pre_snapshot: bytes | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.field_values:
+            raise OperationError("field_values must not be empty.")
+
+    def apply(self, doc: DocumentSession) -> DocumentSession:
+        _require_working_pdf(doc)
+        assert doc.working_path is not None
+        self._pre_snapshot = read_working_bytes(doc)
+
+        out_path = allocate_working_path(doc)
+        with open_pdf(doc.working_path) as pdf:
+            af = pdf.acroform
+            if not af.exists:
+                raise OperationError("Document has no fillable form fields.")
+            by_name = {str(f.fully_qualified_name): f for f in af.fields}
+            for name, value in self.field_values.items():
+                if name not in by_name:
+                    raise OperationError(f"No form field named '{name}'.")
+                by_name[name].set_value(str(value), True)
+            af.generate_appearances_if_needed()
+            pdf.save(out_path)
+
+        return next_session(doc, out_path)
+
+    def invert(self) -> Operation:
+        return snapshot_restore_invert(self._pre_snapshot, self.describe())
+
+    def serialize(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "type": "fill_form",
+            "field_values": dict(self.field_values),
+        }
+
+    def describe(self) -> str:
+        return f"Filled {len(self.field_values)} form field(s)"
+
+
+@dataclass
+class SignOperation(Operation):
+    """Places the image at `image_path` on `page` (1-indexed) within
+    `rect` (x0, y0, x1, y1 - PDF-native points, origin bottom-left,
+    consistent with every other op's coordinates in this package)."""
+
+    image_path: Path
+    page: int
+    rect: tuple[float, float, float, float]
+    _pre_snapshot: bytes | None = field(default=None, init=False, repr=False)
+
+    def apply(self, doc: DocumentSession) -> DocumentSession:
+        _require_working_pdf(doc)
+        assert doc.working_path is not None
+        if not self.image_path.exists():
+            raise OperationError(f"Signature image not found: {self.image_path}")
+        x0, y0, x1, y1 = self.rect
+        if x1 <= x0 or y1 <= y0:
+            raise OperationError("rect must have x1 > x0 and y1 > y0.")
+        self._pre_snapshot = read_working_bytes(doc)
+
+        out_path = allocate_working_path(doc)
+        try:
+            with fitz.open(doc.working_path) as pdf:
+                total = pdf.page_count
+                if not (1 <= self.page <= total):
+                    raise OperationError(
+                        f"Page {self.page} is out of range (document has {total} pages)."
+                    )
+                target_page = pdf[self.page - 1]
+                page_height = target_page.rect.height
+                # fitz's own Rect is top-left-origin (y grows downward) -
+                # convert from this package's bottom-left convention.
+                placement = fitz.Rect(x0, page_height - y1, x1, page_height - y0)
+                target_page.insert_image(placement, filename=str(self.image_path))
+                pdf.save(out_path)
+        except (RuntimeError, ValueError) as exc:
+            raise OperationError(f"Could not place signature image: {exc}") from exc
+
+        return next_session(doc, out_path)
+
+    def invert(self) -> Operation:
+        return snapshot_restore_invert(self._pre_snapshot, self.describe())
+
+    def serialize(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "type": "sign",
+            "image_path": str(self.image_path),
+            "page": self.page,
+            "rect": list(self.rect),
+        }
+
+    def describe(self) -> str:
+        return f"Placed signature on page {self.page}"
+
+
 class FlattenPlugin(ToolPlugin):
     tool_id = "flatten"
     display_name = "Flatten"
@@ -195,3 +323,37 @@ class RemoveAnnotationsPlugin(ToolPlugin):
 
     def operation_class(self) -> type[Operation]:
         return RemoveAnnotationsOperation
+
+
+class FillFormPlugin(ToolPlugin):
+    tool_id = "fill_form"
+    display_name = "Fill Form"
+    compatible_core_version = CORE_VERSION_RANGE
+
+    def build_operation(self, **kwargs: Any) -> Operation:
+        try:
+            field_values = kwargs["field_values"]
+        except KeyError as exc:
+            raise OperationError("Fill Form requires 'field_values'.") from exc
+        return FillFormOperation(field_values=dict(field_values))
+
+    def operation_class(self) -> type[Operation]:
+        return FillFormOperation
+
+
+class SignPlugin(ToolPlugin):
+    tool_id = "sign"
+    display_name = "Sign"
+    compatible_core_version = CORE_VERSION_RANGE
+
+    def build_operation(self, **kwargs: Any) -> Operation:
+        try:
+            image_path = kwargs["image_path"]
+            page = kwargs["page"]
+            rect = kwargs["rect"]
+        except KeyError as exc:
+            raise OperationError("Sign requires 'image_path', 'page', and 'rect'.") from exc
+        return SignOperation(image_path=Path(image_path), page=page, rect=tuple(rect))
+
+    def operation_class(self) -> type[Operation]:
+        return SignOperation

@@ -190,16 +190,53 @@ hand-rolled substitute.
 Not yet built from the Phase 1 GUI wishlist: a pipeline/Workflow
 builder UI (that's Phase 5).
 
-## Phase 2 — Forms & layout (8 of the list done)
+## Phase 2 — Forms & layout (10 of 11 done)
 
 Per `docs/SPEC.md` section 4's Phase 2 list, implemented so far:
 Crop, Resize, N-up, Grayscale, Header/Footer, Bates/page numbering,
-Flatten, Remove Annotations. All registered via `discover_and_load`,
-exposed as CLI subcommands, and as GUI Tools-menu dialogs (same
-`BaseToolDialog` pattern as Phase 1). **Not yet built: Fill & Sign,
-Create Forms** — both need real form-field interaction (detecting
-AcroForm fields, an in-canvas fill/sign UI), a materially bigger scope
-than the rest of this batch; deliberately deferred rather than rushed.
+Flatten, Remove Annotations, Fill Form, Sign. All registered via
+`discover_and_load`, exposed as CLI subcommands, and as GUI Tools-menu
+dialogs (same `BaseToolDialog` pattern as Phase 1). **Not yet built:
+Create Forms** — authoring *new* fields is a different feature from
+filling existing ones (needs a field-placement UI), deliberately
+deferred rather than folded into this batch.
+
+Fill Form / Sign notes:
+- `core/ops/forms.py`'s `FillFormOperation`/`SignOperation` are visual
+  data operations, not cryptographic signing - a digital-signature op
+  using `pyhanko` (already a project dependency, unused so far) would
+  be a distinct future feature, not what "Sign" means here.
+- Key API discovery: `pikepdf.Pdf.acroform` gives a
+  `QPDFAcroFormDocumentHelper`; `field.set_value(value, True)` sets
+  `/V` but does **not** immediately generate an appearance stream (its
+  `need_appearance` bool just flags `/NeedAppearances` for the
+  *viewer* to handle) - `af.generate_appearances_if_needed()` must be
+  called afterward for the value to actually render without relying on
+  the viewer. Verified via `fitz`, which renders/extracts widget text
+  directly (`page.get_text()` picked up the filled value); `pdfplumber`
+  does **not** render annotation/widget appearance streams as part of
+  normal text extraction, so it's the wrong tool to verify form fills
+  or unflattened annotations with (it *is* right for Flatten's output,
+  since that composites into page content, not a widget AP).
+- `SignOperation` uses `fitz`/PyMuPDF (like Grayscale) for
+  `page.insert_image(rect, filename=...)`. Its `rect` is exposed to
+  callers in this package's usual PDF-native bottom-left-origin
+  coordinates (matching Crop/Resize/Watermark/HeaderFooter), converted
+  internally to fitz's own top-left-origin `Rect` - kept deliberately
+  so switching between tools doesn't mean switching coordinate
+  conventions.
+- `gui/dialogs/fill_form_dialog.py`'s `FillFormDialog` is the one
+  dialog whose `__init__` isn't `(parent=None)` - it needs the open
+  document's actual field names (from `list_form_field_names()`)
+  before it can lay out inputs, so `MainWindow._run_tool` special-cases
+  `tool_id == "fill_form"` to construct it directly rather than via the
+  generic `_TOOL_DIALOGS` factory dict.
+- Bug caught before it shipped (by the "does `_run_tool` actually
+  catch this?" question, not by running it): `SignDialog.values()`
+  originally raised bare `ValueError` when no image was chosen, but
+  `_run_tool`'s `try/except` only catches `PDFEditorError` - would have
+  crashed the GUI instead of showing a clean error. Fixed to raise
+  `OperationError`.
 
 - `core/ops/layout.py` — Crop, Resize, N-up, Grayscale. Grayscale
   rasterizes affected pages via PyMuPDF (`fitz`) rather than remapping

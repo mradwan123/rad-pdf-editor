@@ -65,7 +65,7 @@ def _first_party_plugins() -> list[ToolPlugin]:
     import every op module (and their heavier dependencies like
     reportlab/pikepdf) just to build a `Registry` instance.
     """
-    from core.ops.forms import FlattenPlugin, RemoveAnnotationsPlugin
+    from core.ops.forms import FillFormPlugin, FlattenPlugin, RemoveAnnotationsPlugin, SignPlugin
     from core.ops.layout import CropPlugin, GrayscalePlugin, NUpPlugin, ResizePlugin
     from core.ops.merge_split import ExtractPagesPlugin, MergePlugin
     from core.ops.metadata import RenamePlugin, SetMetadataPlugin
@@ -99,6 +99,8 @@ def _first_party_plugins() -> list[ToolPlugin]:
         BatesNumberingPlugin(),
         FlattenPlugin(),
         RemoveAnnotationsPlugin(),
+        FillFormPlugin(),
+        SignPlugin(),
     ]
 
 

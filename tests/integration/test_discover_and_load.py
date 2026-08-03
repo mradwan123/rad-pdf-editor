@@ -32,6 +32,8 @@ EXPECTED_TOOL_IDS = {
     "bates_numbering",
     "flatten",
     "remove_annotations",
+    "fill_form",
+    "sign",
 }
 
 

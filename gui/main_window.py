@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from core.errors import PDFEditorError
 from core.logging_config import get_logger
+from core.ops.forms import list_form_field_names
 from gui.controller import AppController
 from gui.dialogs.base_tool_dialog import BaseToolDialog
 from gui.dialogs.bates_numbering_dialog import BatesNumberingDialog
@@ -34,6 +35,7 @@ from gui.dialogs.compress_dialog import CompressDialog
 from gui.dialogs.crop_dialog import CropDialog
 from gui.dialogs.delete_pages_dialog import DeletePagesDialog
 from gui.dialogs.extract_pages_dialog import ExtractPagesDialog
+from gui.dialogs.fill_form_dialog import FillFormDialog
 from gui.dialogs.flatten_dialog import FlattenDialog
 from gui.dialogs.grayscale_dialog import GrayscaleDialog
 from gui.dialogs.header_footer_dialog import HeaderFooterDialog
@@ -46,6 +48,7 @@ from gui.dialogs.rename_dialog import RenameDialog
 from gui.dialogs.reorder_pages_dialog import ReorderPagesDialog
 from gui.dialogs.resize_dialog import ResizeDialog
 from gui.dialogs.rotate_dialog import RotateDialog
+from gui.dialogs.sign_dialog import SignDialog
 from gui.dialogs.unlock_dialog import UnlockDialog
 from gui.dialogs.watermark_dialog import WatermarkDialog
 from gui.resources import build_logo_pixmap
@@ -82,6 +85,14 @@ _TOOL_DIALOGS: dict[str, _DialogFactory] = {
     "bates_numbering": BatesNumberingDialog,
     "flatten": FlattenDialog,
     "remove_annotations": RemoveAnnotationsDialog,
+    "sign": SignDialog,
+    # FillFormDialog's __init__ takes (field_names, parent), not just
+    # (parent) - it needs the open document's actual AcroForm field
+    # names before it can lay out its inputs. _run_tool special-cases
+    # tool_id == "fill_form" and never actually calls this factory;
+    # it's here only so the Tools menu loop (which needs *a* callable
+    # matching _DialogFactory for every tool_id) has an entry to iterate.
+    "fill_form": lambda parent: FillFormDialog([], parent),
 }
 
 
@@ -264,7 +275,14 @@ class MainWindow(QMainWindow):
         if tool_id != "merge" and not self.controller.is_open:
             self._show_error_message(self.tr("Open a document first."))
             return
-        dialog = dialog_cls(self)
+
+        if tool_id == "fill_form":
+            working_path = self.controller.doc.working_path
+            assert working_path is not None  # guaranteed by the is_open check above
+            dialog: BaseToolDialog = FillFormDialog(list_form_field_names(working_path), self)
+        else:
+            dialog = dialog_cls(self)
+
         if dialog.exec() != BaseToolDialog.DialogCode.Accepted:
             return
         try:
