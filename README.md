@@ -16,17 +16,20 @@ tested. First-party operations: Merge, Split/Extract, Organize
 (reorder), Rotate, Delete Pages, Compress, Metadata (incl. creation/mod
 dates), Rename, Protect/Unlock, Watermark.
 
-**Phase 2 — Forms & layout ops: 10 of 11 done.** Crop, Resize, N-up,
+**Phase 2 — Forms & layout ops: done (11 of 11).** Crop, Resize, N-up,
 Grayscale (rasterizes affected pages — see `core/ops/layout.py`'s
 module docstring for the tradeoff), Header/Footer, Bates/page
-numbering, Flatten, Remove Annotations, Fill Form, Sign. Fill/Sign are
-visual/data operations (set AcroForm field values; place a signature
-image at a page/rect), not cryptographic signing — see
-`core/ops/forms.py`'s module docstring. Not yet built from Phase 2:
-Create Forms (needs its own field-authoring UI, a different feature
-from filling existing fields).
+numbering, Flatten, Remove Annotations, Fill Form, Sign, Create Forms.
+Fill/Sign are visual/data operations (set AcroForm field values; place
+a signature image at a page/rect), not cryptographic signing — see
+`core/ops/forms.py`'s module docstring. Create Forms authors brand-new
+fields (a different feature from Fill Form, which only edits values of
+fields that already exist); text fields and checkboxes are fully
+supported, radio fields are independent toggles rather than a grouped
+mutually-exclusive set — see `core/ops/forms.py`'s module docstring
+for why grouping isn't supported yet.
 
-All 21 operations are registered via `discover_and_load`, covered by
+All 22 operations are registered via `discover_and_load`, covered by
 unit + integration tests, and exposed as both CLI subcommands
 (`python -m cli.main`) and GUI Tools-menu dialogs.
 
