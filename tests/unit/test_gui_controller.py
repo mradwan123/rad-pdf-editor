@@ -44,6 +44,29 @@ def test_open_document_copies_into_private_session_dir(tmp_path: Path) -> None:
     controller.close_session()
 
 
+def test_open_document_with_missing_path_raises_pdf_editor_error(tmp_path: Path) -> None:
+    controller = AppController()
+    with pytest.raises(OperationError):
+        controller.open_document(tmp_path / "does-not-exist.pdf")
+
+
+def test_failed_open_does_not_destroy_the_currently_open_document(tmp_path: Path) -> None:
+    # Regression: open_document used to close the current session
+    # unconditionally before even trying to read the new path, so a
+    # failed Open (bad path) silently threw away whatever was open.
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    controller = AppController()
+    controller.open_document(src)
+    working_before = controller.doc.working_path
+
+    with pytest.raises(OperationError):
+        controller.open_document(tmp_path / "does-not-exist.pdf")
+
+    assert controller.is_open
+    assert controller.doc.working_path == working_before
+    controller.close_session()
+
+
 def test_apply_operation_updates_doc_and_undo_state(tmp_path: Path) -> None:
     from core.ops.organize import RotatePagesOperation
 
@@ -165,4 +188,94 @@ def test_merge_without_opening_a_document_first_creates_a_session(tmp_path: Path
     # the merged working copy must live under the private session dir,
     # not the OS system temp dir.
     assert controller.doc.working_path.is_relative_to(app_data_dir())
+    controller.close_session()
+
+
+# --- dirty-state tracking -------------------------------------------------
+
+
+def test_starts_clean() -> None:
+    controller = AppController()
+    assert not controller.is_dirty
+
+
+def test_opening_a_document_is_clean(tmp_path: Path) -> None:
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    controller = AppController()
+    controller.open_document(src)
+    assert not controller.is_dirty
+    controller.close_session()
+
+
+def test_apply_operation_marks_dirty(tmp_path: Path) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    controller = AppController()
+    controller.open_document(src)
+
+    controller.apply_operation(RotatePagesOperation(angle=90))
+
+    assert controller.is_dirty
+    controller.close_session()
+
+
+def test_undo_marks_dirty(tmp_path: Path) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    controller = AppController()
+    controller.open_document(src)
+    controller.apply_operation(RotatePagesOperation(angle=90))
+
+    controller.save_as(tmp_path / "out.pdf")
+    assert not controller.is_dirty
+
+    controller.undo()
+    assert controller.is_dirty
+    controller.close_session()
+
+
+def test_save_as_clears_dirty(tmp_path: Path) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    controller = AppController()
+    controller.open_document(src)
+    controller.apply_operation(RotatePagesOperation(angle=90))
+    assert controller.is_dirty
+
+    controller.save_as(tmp_path / "out.pdf")
+
+    assert not controller.is_dirty
+    controller.close_session()
+
+
+def test_close_session_clears_dirty(tmp_path: Path) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    controller = AppController()
+    controller.open_document(src)
+    controller.apply_operation(RotatePagesOperation(angle=90))
+    assert controller.is_dirty
+
+    controller.close_session()
+
+    assert not controller.is_dirty
+
+
+def test_opening_a_new_document_over_a_dirty_one_resets_dirty(tmp_path: Path) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    controller = AppController()
+    controller.open_document(a)
+    controller.apply_operation(RotatePagesOperation(angle=90))
+    assert controller.is_dirty
+
+    controller.open_document(b)
+
+    assert not controller.is_dirty
     controller.close_session()

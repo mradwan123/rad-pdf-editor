@@ -216,6 +216,8 @@ class MainWindow(QMainWindow):
     # --- document lifecycle ----------------------------------------------
 
     def _open_document(self) -> None:
+        if not self._confirm_discard_if_dirty():
+            return
         path_str, _selected_filter = QFileDialog.getOpenFileName(
             self,
             self.tr("Open PDF"),
@@ -225,16 +227,22 @@ class MainWindow(QMainWindow):
         )
         if not path_str:
             return
+        self._open_document_path(Path(path_str))
+
+    def _open_document_path(self, path: Path) -> None:
+        """Shared by the Open dialog and the Recent Files menu."""
         try:
-            self.controller.open_document(Path(path_str))
+            self.controller.open_document(path)
         except PDFEditorError as exc:
             self._show_error(exc)
             return
         self._refresh()
 
-    def _save_as(self) -> None:
+    def _save_as(self) -> bool:
+        """Returns True if the document was actually saved (used by
+        the unsaved-changes prompt to know whether to proceed)."""
         if not self.controller.is_open:
-            return
+            return False
         path_str, _selected_filter = QFileDialog.getSaveFileName(
             self,
             self.tr("Save PDF As"),
@@ -243,21 +251,49 @@ class MainWindow(QMainWindow):
             options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not path_str:
-            return
+            return False
         try:
             self.controller.save_as(Path(path_str))
         except PDFEditorError as exc:
             self._show_error(exc)
-            return
+            return False
         self.statusBar().showMessage(self.tr("Saved to {0}").format(path_str), 5000)
+        return True
 
     def _close_document(self) -> None:
+        if not self._confirm_discard_if_dirty():
+            return
         self.controller.close_session()
         self._refresh()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override, fixed name
+        if not self._confirm_discard_if_dirty():
+            event.ignore()
+            return
         self.controller.close_session()
         super().closeEvent(event)
+
+    def _confirm_discard_if_dirty(self) -> bool:
+        """True if it's safe to proceed (open a different file, close,
+        or exit): either there's nothing that could be lost, or the
+        user explicitly chose to save or discard. False means the
+        caller should abort and leave everything as-is."""
+        if not self.controller.is_dirty:
+            return True
+        response = QMessageBox.warning(
+            self,
+            self.tr("Unsaved Changes"),
+            self.tr("This document has unsaved changes. Save before continuing?"),
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if response == QMessageBox.StandardButton.Cancel:
+            return False
+        if response == QMessageBox.StandardButton.Save:
+            return self._save_as()
+        return True  # Discard
 
     # --- undo/redo ---------------------------------------------------------
 

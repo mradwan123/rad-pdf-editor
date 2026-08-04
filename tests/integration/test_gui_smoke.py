@@ -17,8 +17,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pikepdf
 import pytest
 from PySide6.QtCore import QModelIndex, Qt
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from gui.dialogs.bates_numbering_dialog import BatesNumberingDialog
 from gui.dialogs.crop_dialog import CropDialog
@@ -111,6 +112,7 @@ def test_open_render_undo_redo_save_close(qapp: QApplication, tmp_path: Path) ->
     assert window.redo_action.isEnabled()
 
     working_dir = window.controller.doc.working_path.parent
+    window.controller.close_session()
     window.close()
     assert not working_dir.exists()
 
@@ -136,6 +138,7 @@ def test_dragging_a_thumbnail_reorders_the_document(qapp: QApplication, tmp_path
     assert window.undo_action.isEnabled()
     with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
         assert len(pdf.pages) == 4
+    window.controller.close_session()
     window.close()
 
 
@@ -162,6 +165,7 @@ def test_merge_from_tools_menu_opens_a_document(qapp: QApplication, tmp_path: Pa
     assert window.controller.is_open
     assert window.thumbnail_list.count() == 3
     assert window.tool_actions["rotate_pages"].isEnabled()
+    window.controller.close_session()
     window.close()
 
 
@@ -180,6 +184,7 @@ def test_run_tool_applies_operation_via_dialog_values(qapp: QApplication, tmp_pa
 
     with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
         assert int(pdf.pages[0].get("/Rotate", 0)) == 180
+    window.controller.close_session()
     window.close()
 
 
@@ -260,6 +265,7 @@ def test_crop_then_bates_numbering_via_tools_menu(qapp: QApplication, tmp_path: 
 
     assert len(window.controller.doc.operation_log) == 2
     assert window.undo_action.isEnabled()
+    window.controller.close_session()
     window.close()
 
 
@@ -329,6 +335,7 @@ def test_fill_form_via_tools_menu_uses_detected_field_names(
 
     with fitz.open(window.controller.doc.working_path) as pdf:
         assert "Jane Smith" in pdf[0].get_text()
+    window.controller.close_session()
     window.close()
 
 
@@ -360,6 +367,7 @@ def test_sign_via_tools_menu_places_image(qapp: QApplication, tmp_path: Path) ->
     with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
         assert len(pdf.pages) == 1
     assert window.undo_action.isEnabled()
+    window.controller.close_session()
     window.close()
 
 
@@ -384,6 +392,7 @@ def test_refresh_does_not_leak_qpdfdocument_instances(qapp: QApplication, tmp_pa
     after = len([c for c in window.children() if isinstance(c, QPdfDocument)])
 
     assert after == before
+    window.controller.close_session()
     window.close()
 
 
@@ -404,4 +413,81 @@ def test_reordering_to_the_same_order_does_not_record_a_no_op_operation(
     window._apply_thumbnail_reorder()
 
     assert len(window.controller.doc.operation_log) == ops_before
+    window.close()
+
+
+def test_closing_a_clean_document_does_not_prompt(qapp: QApplication, tmp_path: Path) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+
+    with patch.object(QMessageBox, "warning") as mock_warning:
+        window._close_document()
+
+    mock_warning.assert_not_called()
+    assert not window.controller.is_open
+    window.close()
+
+
+def test_closing_a_dirty_document_prompts_and_cancel_keeps_it_open(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window.controller.apply_operation(RotatePagesOperation(angle=90))
+    window._refresh()
+
+    with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Cancel):
+        window._close_document()
+
+    assert window.controller.is_open
+    # window.close() alone would hang here: the document is still
+    # (correctly) dirty, so it'd trigger a second, unmocked closeEvent
+    # -> a real modal QMessageBox.warning() blocking forever
+    # headlessly. Clear the session directly first, then close() is
+    # safe (nothing left to prompt about).
+    window.controller.close_session()
+    window.close()
+
+
+def test_closing_a_dirty_document_discard_closes_it(qapp: QApplication, tmp_path: Path) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window.controller.apply_operation(RotatePagesOperation(angle=90))
+    window._refresh()
+
+    with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Discard):
+        window._close_document()
+
+    assert not window.controller.is_open
+    window.close()
+
+
+def test_window_close_event_is_ignored_when_user_cancels_unsaved_prompt(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window.controller.apply_operation(RotatePagesOperation(angle=90))
+    window._refresh()
+
+    event = QCloseEvent()
+    with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Cancel):
+        window.closeEvent(event)
+
+    assert not event.isAccepted()
+    assert window.controller.is_open
+    # See the comment in test_closing_a_dirty_document_prompts_and_cancel_keeps_it_open
+    # - window.close() alone here would hang on a real, unmocked prompt.
+    window.controller.close_session()
     window.close()
