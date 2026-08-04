@@ -16,10 +16,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pikepdf
 import pytest
-from PySide6.QtCore import QModelIndex, Qt
+from PySide6.QtCore import QModelIndex, QPoint, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox
 
 from gui.dialogs.bates_numbering_dialog import BatesNumberingDialog
 from gui.dialogs.crop_dialog import CropDialog
@@ -583,5 +583,86 @@ def test_opening_a_recent_file_over_a_dirty_document_prompts_first(
         window._open_recent_file(b)
 
     assert window.controller.doc.source_path == a
+    window.controller.close_session()
+    window.close()
+
+
+# --- thumbnail context menu --------------------------------------------------
+#
+# QMenu.exec() is a native/compiled PySide6 method - unlike the
+# project's own BaseToolDialog subclasses (a real Python class, so
+# `patch.object(SomeDialog, "exec", fake)` genuinely overrides it),
+# patching it the same way does NOT intercept the call: menu.exec(pos)
+# still runs the real blocking modal popup, which hangs forever with
+# no headless UI to click through (confirmed - hung pytest, had to
+# kill -9 the stuck process). So these tests exercise the actual
+# operation-applying logic directly (_apply_thumbnail_rotate /
+# _apply_thumbnail_delete) rather than trying to drive it through a
+# faked context-menu popup.
+
+
+def test_thumbnail_context_menu_rotate_right_rotates_selected_pages_only(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 3)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+
+    window._apply_thumbnail_rotate([2], angle=90)
+
+    with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 0
+        assert int(pdf.pages[1].get("/Rotate", 0)) == 90
+        assert int(pdf.pages[2].get("/Rotate", 0)) == 0
+    window.controller.close_session()
+    window.close()
+
+
+def test_thumbnail_context_menu_rotate_left_uses_negative_angle(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+
+    window._apply_thumbnail_rotate([1], angle=-90)
+
+    with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 270
+    window.controller.close_session()
+    window.close()
+
+
+def test_thumbnail_context_menu_delete_removes_selected_pages(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 3)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+
+    window._apply_thumbnail_delete([1, 3])
+
+    with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
+        assert len(pdf.pages) == 1
+    window.controller.close_session()
+    window.close()
+
+
+def test_thumbnail_context_menu_does_nothing_without_a_selection(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+    assert window.thumbnail_list.selectedItems() == []
+
+    with patch.object(QMenu, "exec") as mock_exec:
+        window._show_thumbnail_context_menu(QPoint(0, 0))
+
+    mock_exec.assert_not_called()
     window.controller.close_session()
     window.close()

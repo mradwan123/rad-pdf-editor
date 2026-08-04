@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QStackedWidget,
@@ -120,6 +121,8 @@ class MainWindow(QMainWindow):
         self.thumbnail_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self.thumbnail_list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.thumbnail_list.model().rowsMoved.connect(self._on_thumbnails_reordered)
+        self.thumbnail_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.thumbnail_list.customContextMenuRequested.connect(self._show_thumbnail_context_menu)
 
         self.empty_state = self._build_empty_state()
 
@@ -456,6 +459,46 @@ class MainWindow(QMainWindow):
         # the new document (confirming the drag), on failure it
         # discards the stale drag-and-drop visual order so the grid
         # matches the actual (unchanged) document again.
+        self._refresh()
+
+    def _show_thumbnail_context_menu(self, pos: QPoint) -> None:
+        selected = self.thumbnail_list.selectedItems()
+        if not selected:
+            return
+        pages = sorted(int(item.data(Qt.ItemDataRole.UserRole)) for item in selected)
+
+        menu = QMenu(self)
+        rotate_left_action = menu.addAction(self.tr("Rotate Left"))
+        rotate_right_action = menu.addAction(self.tr("Rotate Right"))
+        menu.addSeparator()
+        delete_action = menu.addAction(self.tr("Delete Selected"))
+
+        chosen = menu.exec(self.thumbnail_list.viewport().mapToGlobal(pos))
+        if chosen is rotate_left_action:
+            self._apply_thumbnail_rotate(pages, angle=-90)
+        elif chosen is rotate_right_action:
+            self._apply_thumbnail_rotate(pages, angle=90)
+        elif chosen is delete_action:
+            self._apply_thumbnail_delete(pages)
+
+    def _apply_thumbnail_rotate(self, pages: list[int], angle: int) -> None:
+        try:
+            plugin = self.controller.get_plugin("rotate_pages")
+            operation = plugin.build_operation(angle=angle, pages=pages)
+            self.controller.apply_operation(operation)
+        except PDFEditorError as exc:
+            self._show_error(exc)
+            return
+        self._refresh()
+
+    def _apply_thumbnail_delete(self, pages: list[int]) -> None:
+        try:
+            plugin = self.controller.get_plugin("delete_pages")
+            operation = plugin.build_operation(pages=pages)
+            self.controller.apply_operation(operation)
+        except PDFEditorError as exc:
+            self._show_error(exc)
+            return
         self._refresh()
 
     def _update_action_state(self) -> None:
