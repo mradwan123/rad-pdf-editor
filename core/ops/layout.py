@@ -1,4 +1,5 @@
-"""Crop, Resize, N-up, and Grayscale operations (SPEC.md Phase 2 list).
+"""Crop, Resize, N-up, Grayscale, and Flip operations (SPEC.md Phase 2
+list).
 
 Grayscale note: this rasterizes each target page to a grayscale image
 at `dpi` and replaces the page with it (via PyMuPDF/fitz, an existing
@@ -13,7 +14,7 @@ to grayscale" tools make when applied generically to arbitrary PDFs.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import fitz
 import pikepdf
@@ -287,6 +288,69 @@ class GrayscaleOperation(Operation):
         return "Converted to grayscale"
 
 
+@dataclass
+class FlipOperation(Operation):
+    """Mirrors `pages` (1-indexed; empty means all pages) horizontally
+    or vertically, in place - orientation only, page dimensions are
+    unchanged (unlike Resize/Crop, mediabox/cropbox are left alone).
+
+    Implemented the same way ResizeOperation is: prepend a content-
+    stream transform matrix (`cm`) around the existing content, rather
+    than touching the page's drawing operators directly. Horizontal
+    flip mirrors around the page's vertical center axis; vertical flip
+    mirrors around its horizontal center axis.
+    """
+
+    direction: Literal["horizontal", "vertical"]
+    pages: list[int] = field(default_factory=list)
+    _pre_snapshot: bytes | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.direction not in ("horizontal", "vertical"):
+            raise OperationError(
+                f"direction must be 'horizontal' or 'vertical', got {self.direction!r}."
+            )
+
+    def apply(self, doc: DocumentSession) -> DocumentSession:
+        _require_working_pdf(doc)
+        assert doc.working_path is not None
+        self._pre_snapshot = read_working_bytes(doc)
+
+        out_path = allocate_working_path(doc)
+        with open_pdf(doc.working_path) as pdf:
+            total = len(pdf.pages)
+            targets = resolve_page_targets(self.pages, total)
+            for n in targets:
+                page = pdf.pages[n - 1]
+                box = [float(x) for x in page.mediabox]
+                width = box[2] - box[0]
+                height = box[3] - box[1]
+                if self.direction == "horizontal":
+                    matrix = f"q -1 0 0 1 {width} 0 cm\n"
+                else:
+                    matrix = f"q 1 0 0 -1 0 {height} cm\n"
+                page.contents_add(matrix.encode(), prepend=True)
+                page.contents_add(b"\nQ", prepend=False)
+            pdf.save(out_path)
+
+        return next_session(doc, out_path)
+
+    def invert(self) -> Operation:
+        return snapshot_restore_invert(self._pre_snapshot, self.describe())
+
+    def serialize(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "type": "flip",
+            "direction": self.direction,
+            "pages": list(self.pages),
+        }
+
+    def describe(self) -> str:
+        target = "all pages" if not self.pages else f"{len(self.pages)} page(s)"
+        return f"Flipped {target} {self.direction}ly"
+
+
 class CropPlugin(ToolPlugin):
     tool_id = "crop"
     display_name = "Crop"
@@ -352,3 +416,19 @@ class GrayscalePlugin(ToolPlugin):
 
     def operation_class(self) -> type[Operation]:
         return GrayscaleOperation
+
+
+class FlipPlugin(ToolPlugin):
+    tool_id = "flip"
+    display_name = "Flip"
+    compatible_core_version = CORE_VERSION_RANGE
+
+    def build_operation(self, **kwargs: Any) -> Operation:
+        try:
+            direction = kwargs["direction"]
+        except KeyError as exc:
+            raise OperationError("Flip requires a 'direction'.") from exc
+        return FlipOperation(direction=direction, pages=list(kwargs.get("pages", [])))
+
+    def operation_class(self) -> type[Operation]:
+        return FlipOperation

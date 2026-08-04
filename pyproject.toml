@@ -12,6 +12,11 @@ dependencies = [
     "pdfplumber>=0.11",
     "openpyxl>=3.1",
     "pyhanko>=0.25",
+    "python-docx>=1.1",
+    "python-pptx>=1.0",
+    "xhtml2pdf>=0.2.15",
+    "deskew>=1.6",
+    "Pillow>=10",
 ]
 
 [project.optional-dependencies]
@@ -42,7 +47,34 @@ disallow_untyped_defs = false
 warn_return_any = false
 
 [[tool.mypy.overrides]]
-module = ["fitz.*", "pikepdf.*", "ocrmypdf.*", "pyhanko.*", "pdfplumber.*", "reportlab.*"]
+module = [
+    "fitz.*",
+    "pikepdf.*",
+    "ocrmypdf.*",
+    "pyhanko.*",
+    "pdfplumber.*",
+    "reportlab.*",
+    "docx.*",
+    "pptx.*",
+    "xhtml2pdf.*",
+    "openpyxl.*",
+]
+ignore_missing_imports = true
+
+# scikit-image's dependency chain (tifffile, reached via skimage's
+# package-level imports even though we only touch skimage.color/
+# feature/transform) ships source using Python 3.12-only syntax,
+# which chokes mypy at this project's python_version = "3.11" target.
+# follow_imports = "skip" avoids parsing that source at all (treated
+# as Any) - confirmed by hand to work, and robust to whatever version
+# pip resolves, unlike pinning numpy/scikit-image upper bounds.
+[[tool.mypy.overrides]]
+module = ["skimage.*", "tifffile.*", "imageio.*", "scipy.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = "deskew.*"
 ignore_missing_imports = true
 
 # --- ruff: lint + format ---

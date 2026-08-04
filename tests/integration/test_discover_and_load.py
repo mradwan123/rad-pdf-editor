@@ -35,6 +35,20 @@ EXPECTED_TOOL_IDS = {
     "fill_form",
     "sign",
     "create_form_field",
+    "flip",
+    "pdf_to_docx",
+    "pdf_to_pptx",
+    "pdf_to_xlsx",
+    "pdf_to_html",
+    "pdf_to_jpg",
+    "docx_to_pdf",
+    "pptx_to_pdf",
+    "xlsx_to_pdf",
+    "html_to_pdf",
+    "jpg_to_pdf",
+    "ocr",
+    "deskew",
+    "repair",
 }
 
 

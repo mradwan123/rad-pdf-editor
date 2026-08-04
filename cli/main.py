@@ -126,6 +126,11 @@ def _build_parser() -> argparse.ArgumentParser:
     grayscale.add_argument("--pages", default="", help="comma-separated 1-indexed pages; default: all")
     grayscale.add_argument("--dpi", type=int, default=200)
 
+    flip = sub.add_parser("flip", help="Mirror pages horizontally or vertically")
+    add_single_input(flip)
+    flip.add_argument("--direction", required=True, choices=["horizontal", "vertical"])
+    flip.add_argument("--pages", default="", help="comma-separated 1-indexed pages; default: all")
+
     header_footer = sub.add_parser("header_footer", help="Stamp header/footer text on every page")
     add_single_input(header_footer)
     header_footer.add_argument("--header-text", default="")
@@ -203,6 +208,71 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="initial checked state (--field-type checkbox/radio only)",
     )
+
+    pdf_to_docx = sub.add_parser("pdf_to_docx", help="Convert the current document to Word (.docx)")
+    add_single_input(pdf_to_docx)
+
+    pdf_to_pptx = sub.add_parser(
+        "pdf_to_pptx", help="Convert the current document to PowerPoint (.pptx)"
+    )
+    add_single_input(pdf_to_pptx)
+    pdf_to_pptx.add_argument("--dpi", type=int, default=150, help="fallback-path image quality")
+
+    pdf_to_xlsx = sub.add_parser(
+        "pdf_to_xlsx", help="Extract tables from the current document into Excel (.xlsx)"
+    )
+    add_single_input(pdf_to_xlsx)
+
+    pdf_to_html = sub.add_parser(
+        "pdf_to_html", help="Export the current document's text as HTML"
+    )
+    add_single_input(pdf_to_html)
+
+    pdf_to_jpg = sub.add_parser("pdf_to_jpg", help="Render one page to a JPEG")
+    add_single_input(pdf_to_jpg)
+    pdf_to_jpg.add_argument("--page", type=int, required=True, help="1-indexed page to render")
+    pdf_to_jpg.add_argument("--dpi", type=int, default=200)
+
+    docx_to_pdf = sub.add_parser("docx_to_pdf", help="Convert a Word document to PDF")
+    docx_to_pdf.add_argument("source", type=Path, help="source .docx file")
+    docx_to_pdf.add_argument("-o", "--output", type=Path, required=True)
+
+    pptx_to_pdf = sub.add_parser("pptx_to_pdf", help="Convert a PowerPoint file to PDF")
+    pptx_to_pdf.add_argument("source", type=Path, help="source .pptx file")
+    pptx_to_pdf.add_argument("-o", "--output", type=Path, required=True)
+
+    xlsx_to_pdf = sub.add_parser("xlsx_to_pdf", help="Convert an Excel workbook to PDF")
+    xlsx_to_pdf.add_argument("source", type=Path, help="source .xlsx file")
+    xlsx_to_pdf.add_argument("-o", "--output", type=Path, required=True)
+
+    html_to_pdf = sub.add_parser("html_to_pdf", help="Convert an HTML file to PDF")
+    html_to_pdf.add_argument("source", type=Path, help="source .html file")
+    html_to_pdf.add_argument("-o", "--output", type=Path, required=True)
+
+    jpg_to_pdf = sub.add_parser("jpg_to_pdf", help="Combine images into a PDF, one page each")
+    jpg_to_pdf.add_argument("sources", type=Path, nargs="+", help="source images, in order")
+    jpg_to_pdf.add_argument("-o", "--output", type=Path, required=True)
+
+    ocr = sub.add_parser("ocr", help="Add a searchable text layer via OCR")
+    add_single_input(ocr)
+    ocr.add_argument("--language", default="eng", help="Tesseract language code")
+    ocr.add_argument("--force-ocr", action="store_true", help="re-OCR pages that already have text")
+    ocr.add_argument(
+        "--no-skip-text",
+        dest="skip_text",
+        action="store_false",
+        default=True,
+        help="also OCR pages that already have text (default: skip them)",
+    )
+
+    deskew = sub.add_parser("deskew", help="Correct rotational skew on scanned pages")
+    add_single_input(deskew)
+    deskew.add_argument("--pages", default="", help="comma-separated 1-indexed pages; default: all")
+    deskew.add_argument("--dpi", type=int, default=200)
+
+    repair = sub.add_parser("repair", help="Recover a possibly-corrupt PDF")
+    repair.add_argument("source", type=Path, help="source (possibly corrupt) PDF file")
+    repair.add_argument("-o", "--output", type=Path, required=True)
 
     return parser
 
@@ -282,6 +352,8 @@ def _build_kwargs(args: argparse.Namespace) -> dict[str, object]:
         }
     if tool_id == "grayscale":
         return {"pages": _parse_int_list(args.pages), "dpi": args.dpi}
+    if tool_id == "flip":
+        return {"direction": args.direction, "pages": _parse_int_list(args.pages)}
     if tool_id == "header_footer":
         return {
             "header_text": args.header_text,
@@ -318,7 +390,37 @@ def _build_kwargs(args: argparse.Namespace) -> dict[str, object]:
             "default_value": args.default_value,
             "checked": args.checked,
         }
+    if tool_id in ("pdf_to_docx", "pdf_to_xlsx", "pdf_to_html"):
+        return {}
+    if tool_id == "pdf_to_pptx":
+        return {"dpi": args.dpi}
+    if tool_id == "pdf_to_jpg":
+        return {"page": args.page, "dpi": args.dpi}
+    if tool_id in ("docx_to_pdf", "pptx_to_pdf", "xlsx_to_pdf", "html_to_pdf"):
+        return {"source_path": args.source}
+    if tool_id == "jpg_to_pdf":
+        return {"sources": args.sources}
+    if tool_id == "ocr":
+        return {"language": args.language, "force_ocr": args.force_ocr, "skip_text": args.skip_text}
+    if tool_id == "deskew":
+        return {"pages": _parse_int_list(args.pages), "dpi": args.dpi}
+    if tool_id == "repair":
+        return {"source_path": args.source}
     raise AssertionError(f"unhandled tool_id: {tool_id}")  # unreachable - argparse validates choices
+
+
+#: Tool ids whose source is one or more external files, not a PDF to
+#: open as the working document - mirrors MergeOperation's shape
+#: (core/ops/merge_split.py, core/ops/convert_to.py).
+_EXTERNAL_SOURCE_TOOL_IDS = {
+    "merge",
+    "docx_to_pdf",
+    "pptx_to_pdf",
+    "xlsx_to_pdf",
+    "html_to_pdf",
+    "jpg_to_pdf",
+    "repair",
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -331,8 +433,19 @@ def main(argv: list[str] | None = None) -> int:
 
     with network_lockdown(), SessionTempDir() as session:
         try:
-            doc = DocumentSession(working_path=None, source_path=None)
-            if args.tool_id != "merge":
+            if args.tool_id in _EXTERNAL_SOURCE_TOOL_IDS:
+                # No document to open yet - the source is external
+                # file(s), not a working PDF. `working_path` still
+                # needs to point *somewhere inside the session dir* so
+                # that `allocate_working_path`'s output (and, for the
+                # conversion ops, the LibreOffice profile dir derived
+                # from it) never falls back to the OS system temp dir -
+                # this file need not exist, only its parent matters.
+                # Same fix CLAUDE.md documents for the GUI's
+                # AppController.apply_operation, applied here for the
+                # CLI's equivalent gap.
+                doc = DocumentSession(working_path=session.path / "placeholder.pdf", source_path=None)
+            else:
                 working = session.path / f"working{args.input.suffix or '.pdf'}"
                 shutil.copyfile(args.input, working)
                 doc = DocumentSession(working_path=working, source_path=args.input)

@@ -39,23 +39,37 @@ from gui.dialogs.compress_dialog import CompressDialog
 from gui.dialogs.create_form_field_dialog import CreateFormFieldDialog
 from gui.dialogs.crop_dialog import CropDialog
 from gui.dialogs.delete_pages_dialog import DeletePagesDialog
+from gui.dialogs.deskew_dialog import DeskewDialog
+from gui.dialogs.docx_to_pdf_dialog import DocxToPdfDialog
 from gui.dialogs.extract_pages_dialog import ExtractPagesDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
 from gui.dialogs.flatten_dialog import FlattenDialog
+from gui.dialogs.flip_dialog import FlipDialog
 from gui.dialogs.grayscale_dialog import GrayscaleDialog
 from gui.dialogs.header_footer_dialog import HeaderFooterDialog
+from gui.dialogs.html_to_pdf_dialog import HtmlToPdfDialog
+from gui.dialogs.jpg_to_pdf_dialog import JpgToPdfDialog
 from gui.dialogs.merge_dialog import MergeDialog
 from gui.dialogs.metadata_dialog import MetadataDialog
 from gui.dialogs.n_up_dialog import NUpDialog
+from gui.dialogs.ocr_dialog import OcrDialog
+from gui.dialogs.pdf_to_docx_dialog import PdfToDocxDialog
+from gui.dialogs.pdf_to_html_dialog import PdfToHtmlDialog
+from gui.dialogs.pdf_to_jpg_dialog import PdfToJpgDialog
+from gui.dialogs.pdf_to_pptx_dialog import PdfToPptxDialog
+from gui.dialogs.pdf_to_xlsx_dialog import PdfToXlsxDialog
+from gui.dialogs.pptx_to_pdf_dialog import PptxToPdfDialog
 from gui.dialogs.protect_dialog import ProtectDialog
 from gui.dialogs.remove_annotations_dialog import RemoveAnnotationsDialog
 from gui.dialogs.rename_dialog import RenameDialog
 from gui.dialogs.reorder_pages_dialog import ReorderPagesDialog
+from gui.dialogs.repair_dialog import RepairDialog
 from gui.dialogs.resize_dialog import ResizeDialog
 from gui.dialogs.rotate_dialog import RotateDialog
 from gui.dialogs.sign_dialog import SignDialog
 from gui.dialogs.unlock_dialog import UnlockDialog
 from gui.dialogs.watermark_dialog import WatermarkDialog
+from gui.dialogs.xlsx_to_pdf_dialog import XlsxToPdfDialog
 from gui.resources import build_logo_pixmap
 
 log = get_logger(__name__)
@@ -99,6 +113,20 @@ _TOOL_DIALOGS: dict[str, _DialogFactory] = {
     # it's here only so the Tools menu loop (which needs *a* callable
     # matching _DialogFactory for every tool_id) has an entry to iterate.
     "fill_form": lambda parent: FillFormDialog([], parent),
+    "flip": FlipDialog,
+    "pdf_to_docx": PdfToDocxDialog,
+    "pdf_to_pptx": PdfToPptxDialog,
+    "pdf_to_xlsx": PdfToXlsxDialog,
+    "pdf_to_html": PdfToHtmlDialog,
+    "pdf_to_jpg": PdfToJpgDialog,
+    "docx_to_pdf": DocxToPdfDialog,
+    "pptx_to_pdf": PptxToPdfDialog,
+    "xlsx_to_pdf": XlsxToPdfDialog,
+    "html_to_pdf": HtmlToPdfDialog,
+    "jpg_to_pdf": JpgToPdfDialog,
+    "ocr": OcrDialog,
+    "deskew": DeskewDialog,
+    "repair": RepairDialog,
 }
 
 

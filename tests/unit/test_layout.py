@@ -10,7 +10,13 @@ import pytest
 
 from core.errors import OperationError
 from core.model.document import DocumentSession
-from core.ops.layout import CropOperation, GrayscaleOperation, NUpOperation, ResizeOperation
+from core.ops.layout import (
+    CropOperation,
+    FlipOperation,
+    GrayscaleOperation,
+    NUpOperation,
+    ResizeOperation,
+)
 
 
 def _make_pdf(path: Path, num_pages: int, page_size: tuple[int, int] = (300, 400)) -> Path:
@@ -241,3 +247,101 @@ def test_grayscale_undo_restores_color(tmp_path: Path) -> None:
     result = doc.apply(GrayscaleOperation(dpi=100))
     restored = result.undo()
     assert not _has_only_gray_pixels(restored.working_path)
+
+
+# --- Flip -------------------------------------------------------------
+
+
+def _make_marked_pdf(path: Path, page_size: tuple[int, int] = (300, 400)) -> Path:
+    """A page with a red mark only in the top-left corner, so a flip's
+    mirroring is visible by checking which corner the mark ends up in."""
+    doc = fitz.open()
+    page = doc.new_page(width=page_size[0], height=page_size[1])
+    page.draw_rect(fitz.Rect(0, 0, 40, 40), color=(1, 0, 0), fill=(1, 0, 0))
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def _is_red(pixel: tuple[int, ...]) -> bool:
+    r, g, b = pixel[0], pixel[1], pixel[2]
+    return r > 200 and g < 60 and b < 60
+
+
+def _corner_pixel(path: Path, corner: str, page_index: int = 0) -> tuple[int, ...]:
+    with fitz.open(path) as doc:
+        pix = doc[page_index].get_pixmap()
+        x = 5 if corner in ("top-left", "bottom-left") else pix.width - 5
+        y = 5 if corner in ("top-left", "top-right") else pix.height - 5
+        i = (y * pix.width + x) * pix.n
+        return tuple(pix.samples[i : i + pix.n])
+
+
+def test_flip_horizontal_mirrors_the_page(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    working = _make_marked_pdf(session_dir / "working.pdf")
+    doc = DocumentSession(working_path=working, source_path=None)
+
+    assert _is_red(_corner_pixel(working, "top-left"))
+    assert not _is_red(_corner_pixel(working, "top-right"))
+
+    result = doc.apply(FlipOperation(direction="horizontal"))
+    assert _is_red(_corner_pixel(result.working_path, "top-right"))
+    assert not _is_red(_corner_pixel(result.working_path, "top-left"))
+
+
+def test_flip_vertical_mirrors_the_page(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    working = _make_marked_pdf(session_dir / "working.pdf")
+    doc = DocumentSession(working_path=working, source_path=None)
+
+    result = doc.apply(FlipOperation(direction="vertical"))
+    assert _is_red(_corner_pixel(result.working_path, "bottom-left"))
+    assert not _is_red(_corner_pixel(result.working_path, "top-left"))
+
+
+def test_flip_preserves_mediabox(tmp_path: Path) -> None:
+    doc = _session(tmp_path, page_size=(300, 400))
+    result = doc.apply(FlipOperation(direction="horizontal"))
+    assert _mediabox(result.working_path) == [0.0, 0.0, 300.0, 400.0]
+
+
+def test_flip_rejects_invalid_direction() -> None:
+    with pytest.raises(OperationError):
+        FlipOperation(direction="diagonal")
+
+
+def test_flip_with_no_document_open_raises() -> None:
+    doc = DocumentSession(working_path=None, source_path=None)
+    with pytest.raises(OperationError):
+        doc.apply(FlipOperation(direction="horizontal"))
+
+
+def test_flip_only_affects_selected_pages(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    src = fitz.open()
+    for _ in range(2):
+        page = src.new_page(width=300, height=400)
+        page.draw_rect(fitz.Rect(0, 0, 40, 40), color=(1, 0, 0), fill=(1, 0, 0))
+    working = session_dir / "working.pdf"
+    src.save(working)
+    src.close()
+    doc = DocumentSession(working_path=working, source_path=None)
+
+    result = doc.apply(FlipOperation(direction="horizontal", pages=[1]))
+    assert _is_red(_corner_pixel(result.working_path, "top-right", page_index=0))
+    assert _is_red(_corner_pixel(result.working_path, "top-left", page_index=1))
+
+
+def test_flip_undo_restores_original(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    working = _make_marked_pdf(session_dir / "working.pdf")
+    doc = DocumentSession(working_path=working, source_path=None)
+
+    result = doc.apply(FlipOperation(direction="horizontal"))
+    restored = result.undo()
+    assert _is_red(_corner_pixel(restored.working_path, "top-left"))

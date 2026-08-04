@@ -65,6 +65,20 @@ def _first_party_plugins() -> list[ToolPlugin]:
     import every op module (and their heavier dependencies like
     reportlab/pikepdf) just to build a `Registry` instance.
     """
+    from core.ops.convert_from import (
+        PdfToDocxPlugin,
+        PdfToHtmlPlugin,
+        PdfToJpgPlugin,
+        PdfToPptxPlugin,
+        PdfToXlsxPlugin,
+    )
+    from core.ops.convert_to import (
+        DocxToPdfPlugin,
+        HtmlToPdfPlugin,
+        JpgToPdfPlugin,
+        PptxToPdfPlugin,
+        XlsxToPdfPlugin,
+    )
     from core.ops.forms import (
         CreateFormFieldPlugin,
         FillFormPlugin,
@@ -72,16 +86,18 @@ def _first_party_plugins() -> list[ToolPlugin]:
         RemoveAnnotationsPlugin,
         SignPlugin,
     )
-    from core.ops.layout import CropPlugin, GrayscalePlugin, NUpPlugin, ResizePlugin
+    from core.ops.layout import CropPlugin, FlipPlugin, GrayscalePlugin, NUpPlugin, ResizePlugin
     from core.ops.merge_split import ExtractPagesPlugin, MergePlugin
     from core.ops.metadata import RenamePlugin, SetMetadataPlugin
     from core.ops.numbering import BatesNumberingPlugin, HeaderFooterPlugin
+    from core.ops.ocr_scan import DeskewPlugin, OCRPlugin
     from core.ops.organize import (
         CompressPlugin,
         DeletePagesPlugin,
         ReorderPagesPlugin,
         RotatePagesPlugin,
     )
+    from core.ops.repair import RepairPlugin
     from core.ops.security import ProtectPlugin, UnlockPlugin
     from core.ops.watermark import WatermarkPlugin
 
@@ -101,6 +117,7 @@ def _first_party_plugins() -> list[ToolPlugin]:
         ResizePlugin(),
         NUpPlugin(),
         GrayscalePlugin(),
+        FlipPlugin(),
         HeaderFooterPlugin(),
         BatesNumberingPlugin(),
         FlattenPlugin(),
@@ -108,6 +125,19 @@ def _first_party_plugins() -> list[ToolPlugin]:
         FillFormPlugin(),
         SignPlugin(),
         CreateFormFieldPlugin(),
+        PdfToDocxPlugin(),
+        PdfToPptxPlugin(),
+        PdfToXlsxPlugin(),
+        PdfToHtmlPlugin(),
+        PdfToJpgPlugin(),
+        DocxToPdfPlugin(),
+        PptxToPdfPlugin(),
+        XlsxToPdfPlugin(),
+        HtmlToPdfPlugin(),
+        JpgToPdfPlugin(),
+        OCRPlugin(),
+        DeskewPlugin(),
+        RepairPlugin(),
     ]
 
 

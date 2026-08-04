@@ -16,9 +16,9 @@ tested. First-party operations: Merge, Split/Extract, Organize
 (reorder), Rotate, Delete Pages, Compress, Metadata (incl. creation/mod
 dates), Rename, Protect/Unlock, Watermark.
 
-**Phase 2 — Forms & layout ops: done (11 of 11).** Crop, Resize, N-up,
+**Phase 2 — Forms & layout ops: done (12 of 12).** Crop, Resize, N-up,
 Grayscale (rasterizes affected pages — see `core/ops/layout.py`'s
-module docstring for the tradeoff), Header/Footer, Bates/page
+module docstring for the tradeoff), Flip, Header/Footer, Bates/page
 numbering, Flatten, Remove Annotations, Fill Form, Sign, Create Forms.
 Fill/Sign are visual/data operations (set AcroForm field values; place
 a signature image at a page/rect), not cryptographic signing — see
@@ -29,7 +29,43 @@ supported, radio fields are independent toggles rather than a grouped
 mutually-exclusive set — see `core/ops/forms.py`'s module docstring
 for why grouping isn't supported yet.
 
-All 22 operations are registered via `discover_and_load`, covered by
+**Phase 3 — Conversions: done (10 of 10).** Word/PowerPoint/Excel/
+HTML/JPG, both directions. Dual-engine: LibreOffice headless
+(`soffice --convert-to`, if installed) is the primary engine wherever
+it has a real filter for the pair involved, with a pure-Python
+fallback (python-docx, python-pptx, openpyxl+reportlab, xhtml2pdf)
+used automatically otherwise. The "PDF -> Office format" direction is
+pure-Python only in every case — confirmed by hand against the real
+`soffice` binary that LibreOffice has no working filter chain for
+PDF -> docx/pptx/xlsx at all (a PDF always imports as a Draw document,
+whose export filters don't cover Office formats) — see
+`core/ops/convert_common.py`'s module docstring for the full detail
+and the "external file -> PDF" direction, where LibreOffice genuinely
+is the primary engine. `core/ops/convert_from.py` and
+`core/ops/convert_to.py` split the two directions; each operation
+records which engine actually ran in `describe()`, visible in the
+undo-stack UI and audit log.
+
+**Phase 4 — Scans: done (3 of 3).** OCR, Deskew, Repair. OCR
+(`core/ops/ocr_scan.py`) wraps `ocrmypdf`/Tesseract directly - no
+pure-Python fallback exists for real text recognition, so it's a
+required system prerequisite (unlike LibreOffice in Phase 3), and the
+operation raises a clear error up front if `tesseract` isn't found.
+Deskew is deliberately its own operation, not `ocrmypdf`'s bundled
+`deskew=True` flag - that flag was tried first and found unreliable by
+hand (no standalone mode, and its angle detection silently reported
+`0.000°` on a page hand-rotated by a real 8°, no error). The `deskew`
+package (Hough-transform-based) was verified instead: detected the
+same rotation as `-7.999999999999986°` and, once applied, produced a
+genuinely level page. Repair (`core/ops/repair.py`) is two-tier:
+`pikepdf`'s own structural recovery first (handles common corruption -
+e.g. a truncated file - for free), falling back to Ghostscript's
+`-sDEVICE=pdfwrite` repair pass for corruption pikepdf can't parse at
+all, with Ghostscript's output always re-verified by reopening via
+pikepdf before being trusted (confirmed by hand that `gs` can exit 0
+while only partially recovering a file).
+
+All 36 operations are registered via `discover_and_load`, covered by
 unit + integration tests, and exposed as both CLI subcommands
 (`python -m cli.main`) and GUI Tools-menu dialogs.
 
@@ -47,7 +83,7 @@ PDF Editor**: PySide6 + Qt Fusion style, a dark silver/gray/black theme
 a programmatically-drawn app icon/logo (`gui/resources.py`, no binary
 image assets checked in), a branded empty-state welcome screen, a
 thumbnail page grid (rendered via `QtPdf`), Open/Save As/Close,
-Undo/Redo, and a Tools menu with a dialog for each of the 11
+Undo/Redo, and a Tools menu with a dialog for each of the 36
 operations, all subclassing a shared `BaseToolDialog` (SPEC.md 6.2).
 `gui/controller.py` holds the Qt-free session/document glue so it's
 unit-testable without a display server; `tests/integration/test_gui_smoke.py`
@@ -67,6 +103,23 @@ python -m venv .venv
 source .venv/bin/activate   # .venv\Scripts\activate on Windows
 pip install -e ".[dev]"
 ```
+
+**Optional**: install [LibreOffice](https://www.libreoffice.org/) for
+higher-fidelity Word/PowerPoint/Excel/HTML <-> PDF conversion (Phase
+3). It's a system-level install, not a pip dependency — its absence
+just means every conversion op automatically uses its pure-Python
+fallback instead (see the Phase 3 status note above).
+
+**Required for OCR**: install `tesseract-ocr` (e.g. `apt install
+tesseract-ocr` on Debian/Ubuntu) for the OCR tool (Phase 4). Unlike
+LibreOffice, there is no pure-Python fallback for real text
+recognition — the OCR operation raises a clear error if it's missing,
+rather than degrading silently. Deskew and Repair don't need it.
+
+**Optional for Repair**: Ghostscript (usually already present on
+Linux/macOS; `gs` on `PATH`) is used as Repair's fallback engine for
+corruption `pikepdf`'s own structural recovery can't handle. Most
+corrupt PDFs are recovered by `pikepdf` alone without needing it.
 
 ## Development
 
