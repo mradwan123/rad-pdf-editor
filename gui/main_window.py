@@ -153,12 +153,71 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.redo_action)
 
         tools_menu = self.menuBar().addMenu(self.tr("&Tools"))
-        for tool_id, dialog_cls in TOOL_DIALOGS.items():
-            plugin = self.controller.get_plugin(tool_id)
-            action = QAction(plugin.display_name, self)
-            action.triggered.connect(self._make_tool_handler(tool_id, dialog_cls))
-            tools_menu.addAction(action)
-            self.tool_actions[tool_id] = action
+        #: (submenu label, ordered tool_ids) - grouped so the Tools menu
+        #: doesn't grow into one flat 30+-item list as new tool_ids are
+        #: added; every TOOL_DIALOGS key must appear in exactly one
+        #: group (checked below) so a forgotten category can't silently
+        #: drop a tool from the menu.
+        tool_categories: list[tuple[str, list[str]]] = [
+            (
+                self.tr("&Organize Pages"),
+                [
+                    "merge",
+                    "extract_pages",
+                    "reorder_pages",
+                    "rotate_pages",
+                    "delete_pages",
+                    "flip",
+                ],
+            ),
+            (
+                self.tr("&Edit and Design"),
+                [
+                    "crop",
+                    "resize",
+                    "n_up",
+                    "grayscale",
+                    "watermark",
+                    "header_footer",
+                    "bates_numbering",
+                ],
+            ),
+            (
+                self.tr("F&orms and Signatures"),
+                ["fill_form", "sign", "create_form_field", "flatten", "remove_annotations"],
+            ),
+            (self.tr("&Security"), ["protect", "unlock"]),
+            (self.tr("&Document Properties"), ["set_metadata", "rename", "compress"]),
+            (
+                self.tr("Convert &from PDF"),
+                ["pdf_to_docx", "pdf_to_pptx", "pdf_to_xlsx", "pdf_to_html", "pdf_to_jpg"],
+            ),
+            (
+                self.tr("Convert &to PDF"),
+                ["docx_to_pdf", "pptx_to_pdf", "xlsx_to_pdf", "html_to_pdf", "jpg_to_pdf"],
+            ),
+            # Phase 4 (Scans) didn't exist when the seven categories
+            # above were first drawn up, and none of them is a clean
+            # fit - OCR/Deskew/Repair operate on a whole scanned/
+            # damaged document, not page layout, form/security, or
+            # format conversion. An eighth category, rather than
+            # forcing one of these into a group it doesn't belong in.
+            (self.tr("Scans &and Repair"), ["ocr", "deskew", "repair"]),
+        ]
+        categorized_tool_ids: set[str] = set()
+        for category_label, tool_ids in tool_categories:
+            category_menu = tools_menu.addMenu(category_label)
+            for tool_id in tool_ids:
+                dialog_cls = TOOL_DIALOGS[tool_id]
+                plugin = self.controller.get_plugin(tool_id)
+                action = QAction(plugin.display_name, self)
+                action.triggered.connect(self._make_tool_handler(tool_id, dialog_cls))
+                category_menu.addAction(action)
+                self.tool_actions[tool_id] = action
+                categorized_tool_ids.add(tool_id)
+        if categorized_tool_ids != set(TOOL_DIALOGS):
+            missing = sorted(set(TOOL_DIALOGS) - categorized_tool_ids)
+            raise ValueError(f"Tools menu categories missing tool_id(s): {missing}")
 
         # Building/running a workflow is document-independent (Build
         # doesn't touch the currently-open document at all; Run works
