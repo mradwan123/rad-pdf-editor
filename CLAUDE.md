@@ -268,3 +268,64 @@ Fill Form / Sign notes:
   geometry methods) - `mypy --strict` flagged "cannot assign to a
   method" immediately. Renamed to `page_width`/`page_height`. Worth
   remembering when naming QWidget subclass attributes generally.
+
+## UX polish batch (done)
+
+Four items, each committed/pushed separately after its own full
+ruff/mypy --strict/pytest pass:
+
+1. **Dirty-state tracking + unsaved-changes warning.** `AppController`
+   (`gui/controller.py`) tracks a conservative `is_dirty` flag - set on
+   any `apply_operation`/`undo`/`redo`, cleared on open/save/close.
+   `MainWindow._confirm_discard_if_dirty()` gates Open, Close Document,
+   and window-close (`closeEvent`) behind a Save/Discard/Cancel prompt,
+   only when there's actually something to lose. `_save_as()` now
+   returns `bool` so the prompt handler knows whether "Save" actually
+   completed before treating the discard-guard as satisfied.
+2. **Recent Files.** `core/session/recent_files.py`'s `RecentFiles`
+   persists up to 10 recently-opened paths as JSON under
+   `app_data_dir()` (Qt-free, respects `PDFEDITOR_APP_DATA_DIR` like
+   the audit log/autosave - deliberately not `QSettings`, which would
+   write to the real per-OS registry/config location even under
+   tests). File > Open Recent rebuilds on `aboutToShow`; a stale entry
+   (moved/deleted since last time) shows the normal error and is
+   dropped from the list automatically. Reopening through this menu
+   goes through the same dirty-check guard as File > Open.
+3. **Thumbnail right-click context menu.** Rotate Left/Right, Delete
+   Selected, operating on `thumbnail_list.selectedItems()`'s
+   `Qt.ItemDataRole.UserRole` page numbers directly - no dialog.
+4. **Busy-cursor feedback.** `MainWindow._busy_cursor()` (a status-bar
+   "Working..." message + `QApplication.setOverrideCursor(WaitCursor)`
+   /`restoreOverrideCursor()`) wraps every `apply_operation`/`undo`/
+   `redo` call site. Deliberately not a `QThreadPool` background-
+   execution rewrite - operations stay synchronous, this just makes an
+   otherwise-unresponsive-looking wait visible.
+
+Three testing gotchas worth remembering for future GUI test-writing in
+this project:
+
+- **A `MagicMock()` is not a safe stand-in for a real Qt event.**
+  Passing one to `closeEvent()` where the code path can trigger further
+  real Qt machinery (a second, real `closeEvent` from the test's own
+  cleanup `window.close()` call, hitting an unmocked, blocking
+  `QMessageBox.warning()` with no headless UI to click through) hung
+  pytest indefinitely - required `kill -9` on the stuck process to
+  recover, twice, before root-causing it. Fixed by using a real
+  `QCloseEvent()` instance and checking `event.isAccepted()`, and by
+  making sure any smoke test that leaves the document dirty calls
+  `window.controller.close_session()` before its cleanup `window.close()`
+  rather than relying on a bare `close()` to be harmless.
+- **`patch.object(QMenu, "exec", fake)` does not actually intercept the
+  call**, unlike patching a real Python class's method (every
+  `BaseToolDialog` subclass's `.exec` patches work fine, since those
+  are genuine Python classes). `QMenu.exec` is a native/compiled
+  PySide6 method - the "patched" version is silently bypassed and the
+  real blocking modal popup still runs, hanging headlessly the same
+  way. Don't try to test a `QMenu`-`.exec()`-driven flow end-to-end;
+  test the underlying handler methods directly instead.
+- Naming a method `list()` inside a class whose other methods annotate
+  parameters as `list[Path]` etc. makes `mypy --strict` resolve those
+  later annotations against the method, not the builtin type
+  (`core/session/recent_files.py` hit this) - fixed with a
+  module-level type alias (`_PathList = list[Path]`) rather than
+  renaming the public method.
