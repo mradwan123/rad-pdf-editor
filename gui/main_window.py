@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from core.errors import PDFEditorError
 from core.logging_config import get_logger
 from core.ops.forms import list_form_field_names
+from core.session.recent_files import RecentFiles
 from gui.controller import AppController
 from gui.dialogs.base_tool_dialog import BaseToolDialog
 from gui.dialogs.bates_numbering_dialog import BatesNumberingDialog
@@ -103,6 +104,7 @@ class MainWindow(QMainWindow):
         self.resize(900, 700)
 
         self.controller = AppController()
+        self.recent_files = RecentFiles()
 
         self.thumbnail_list = QListWidget()
         self.thumbnail_list.setAccessibleName(self.tr("Page thumbnails"))
@@ -186,6 +188,8 @@ class MainWindow(QMainWindow):
 
         file_menu = self.menuBar().addMenu(self.tr("&File"))
         file_menu.addAction(self.open_action)
+        self.recent_files_menu = file_menu.addMenu(self.tr("Open &Recent"))
+        self.recent_files_menu.aboutToShow.connect(self._populate_recent_files_menu)
         file_menu.addAction(self.save_as_action)
         file_menu.addAction(self.close_action)
 
@@ -234,9 +238,37 @@ class MainWindow(QMainWindow):
         try:
             self.controller.open_document(path)
         except PDFEditorError as exc:
+            # A recent-file entry that fails to open (moved/deleted
+            # since last time) is stale - drop it so it doesn't keep
+            # reappearing in the menu instead of just erroring forever.
+            self.recent_files.remove(path)
             self._show_error(exc)
             return
+        self.recent_files.add(path)
         self._refresh()
+
+    def _populate_recent_files_menu(self) -> None:
+        self.recent_files_menu.clear()
+        paths = self.recent_files.list()
+        if not paths:
+            empty_action = self.recent_files_menu.addAction(self.tr("(No recent files)"))
+            empty_action.setEnabled(False)
+            return
+        for path in paths:
+            action = self.recent_files_menu.addAction(path.name)
+            action.setToolTip(str(path))
+            action.triggered.connect(self._make_recent_file_handler(path))
+        self.recent_files_menu.addSeparator()
+        clear_action = self.recent_files_menu.addAction(self.tr("Clear Recent Files"))
+        clear_action.triggered.connect(self.recent_files.clear)
+
+    def _make_recent_file_handler(self, path: Path) -> Any:
+        return lambda: self._open_recent_file(path)
+
+    def _open_recent_file(self, path: Path) -> None:
+        if not self._confirm_discard_if_dirty():
+            return
+        self._open_document_path(path)
 
     def _save_as(self) -> bool:
         """Returns True if the document was actually saved (used by

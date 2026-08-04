@@ -491,3 +491,97 @@ def test_window_close_event_is_ignored_when_user_cancels_unsaved_prompt(
     # - window.close() alone here would hang on a real, unmocked prompt.
     window.controller.close_session()
     window.close()
+
+
+# --- recent files -----------------------------------------------------------
+
+
+def test_opening_a_document_adds_it_to_recent_files(qapp: QApplication, tmp_path: Path) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+
+    window._open_document_path(src)
+
+    assert window.recent_files.list() == [src]
+    window.controller.close_session()
+    window.close()
+
+
+def test_recent_files_menu_lists_most_recent_first_and_reopens_on_click(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 2)
+    window = MainWindow()
+    window._open_document_path(a)
+    window._open_document_path(b)
+
+    window._populate_recent_files_menu()
+    actions = window.recent_files_menu.actions()
+    # newest first, then a separator, then "Clear Recent Files"
+    assert [a.text() for a in actions[:2]] == ["b.pdf", "a.pdf"]
+
+    actions[1].trigger()  # reopen a.pdf
+
+    assert window.controller.doc.source_path == a
+    window.controller.close_session()
+    window.close()
+
+
+def test_recent_files_menu_shows_placeholder_when_empty(qapp: QApplication) -> None:
+    window = MainWindow()
+
+    window._populate_recent_files_menu()
+
+    actions = window.recent_files_menu.actions()
+    assert len(actions) == 1
+    assert not actions[0].isEnabled()
+    window.close()
+
+
+def test_opening_a_stale_recent_file_shows_error_and_drops_it_from_the_list(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    missing = tmp_path / "gone.pdf"
+    window = MainWindow()
+    window.recent_files.add(missing)
+
+    with patch.object(QMessageBox, "critical") as mock_critical:
+        window._open_recent_file(missing)
+
+    mock_critical.assert_called_once()
+    assert window.recent_files.list() == []
+    window.close()
+
+
+def test_clear_recent_files_empties_the_list(qapp: QApplication, tmp_path: Path) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    window._open_document_path(src)
+    assert window.recent_files.list() == [src]
+
+    window.recent_files.clear()
+
+    assert window.recent_files.list() == []
+    window.controller.close_session()
+    window.close()
+
+
+def test_opening_a_recent_file_over_a_dirty_document_prompts_first(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    window = MainWindow()
+    window._open_document_path(a)
+    window.controller.apply_operation(RotatePagesOperation(angle=90))
+    window.recent_files.add(b)
+
+    with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Cancel):
+        window._open_recent_file(b)
+
+    assert window.controller.doc.source_path == a
+    window.controller.close_session()
+    window.close()
