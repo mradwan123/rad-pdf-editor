@@ -181,6 +181,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="x0,y0,x1,y1 in points, PDF-native origin bottom-left, e.g. 50,50,250,130",
     )
 
+    create_form_field = sub.add_parser(
+        "create_form_field", help="Add a new text/checkbox/radio AcroForm field"
+    )
+    add_single_input(create_form_field)
+    create_form_field.add_argument("--page", type=int, required=True, help="1-indexed target page")
+    create_form_field.add_argument("--field-name", required=True)
+    create_form_field.add_argument(
+        "--field-type", required=True, choices=["text", "checkbox", "radio"]
+    )
+    create_form_field.add_argument(
+        "--rect",
+        required=True,
+        help="x0,y0,x1,y1 in points, PDF-native origin bottom-left, e.g. 50,300,250,320",
+    )
+    create_form_field.add_argument(
+        "--default-value", default="", help="initial text (--field-type text only)"
+    )
+    create_form_field.add_argument(
+        "--checked",
+        action="store_true",
+        help="initial checked state (--field-type checkbox/radio only)",
+    )
+
     return parser
 
 
@@ -286,6 +309,15 @@ def _build_kwargs(args: argparse.Namespace) -> dict[str, object]:
         return {"field_values": _parse_field_values(args.field)}
     if tool_id == "sign":
         return {"image_path": args.image, "page": args.page, "rect": _parse_rect(args.rect)}
+    if tool_id == "create_form_field":
+        return {
+            "page": args.page,
+            "field_name": args.field_name,
+            "field_type": args.field_type,
+            "rect": _parse_rect(args.rect),
+            "default_value": args.default_value,
+            "checked": args.checked,
+        }
     raise AssertionError(f"unhandled tool_id: {tool_id}")  # unreachable - argparse validates choices
 
 

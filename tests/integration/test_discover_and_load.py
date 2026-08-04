@@ -34,6 +34,7 @@ EXPECTED_TOOL_IDS = {
     "remove_annotations",
     "fill_form",
     "sign",
+    "create_form_field",
 }
 
 

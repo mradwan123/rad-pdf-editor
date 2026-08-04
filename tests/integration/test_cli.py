@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import fitz
 import pikepdf
 import pytest
 
@@ -120,3 +121,34 @@ def test_malformed_pages_argument_fails_cleanly_not_a_traceback(
     )
     assert exit_code == 1
     assert "Error:" in capsys.readouterr().err
+
+
+def test_create_form_field_adds_a_text_field(tmp_path: Path) -> None:
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    out = tmp_path / "out.pdf"
+
+    exit_code = main(
+        [
+            "create_form_field",
+            str(src),
+            "-o",
+            str(out),
+            "--page",
+            "1",
+            "--field-name",
+            "full_name",
+            "--field-type",
+            "text",
+            "--rect",
+            "50,300,250,320",
+            "--default-value",
+            "Jane Doe",
+        ]
+    )
+
+    assert exit_code == 0
+    with fitz.open(out) as pdf:
+        widgets = list(pdf[0].widgets())
+    assert len(widgets) == 1
+    assert widgets[0].field_name == "full_name"
+    assert widgets[0].field_value == "Jane Doe"

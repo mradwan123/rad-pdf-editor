@@ -190,16 +190,42 @@ hand-rolled substitute.
 Not yet built from the Phase 1 GUI wishlist: a pipeline/Workflow
 builder UI (that's Phase 5).
 
-## Phase 2 — Forms & layout (10 of 11 done)
+## Phase 2 — Forms & layout (11 of 11 done)
 
-Per `docs/SPEC.md` section 4's Phase 2 list, implemented so far:
-Crop, Resize, N-up, Grayscale, Header/Footer, Bates/page numbering,
-Flatten, Remove Annotations, Fill Form, Sign. All registered via
+Per `docs/SPEC.md` section 4's Phase 2 list, implemented: Crop,
+Resize, N-up, Grayscale, Header/Footer, Bates/page numbering, Flatten,
+Remove Annotations, Fill Form, Sign, Create Forms. All registered via
 `discover_and_load`, exposed as CLI subcommands, and as GUI Tools-menu
-dialogs (same `BaseToolDialog` pattern as Phase 1). **Not yet built:
-Create Forms** — authoring *new* fields is a different feature from
-filling existing ones (needs a field-placement UI), deliberately
-deferred rather than folded into this batch.
+dialogs (same `BaseToolDialog` pattern as Phase 1). Phase 2 is
+complete.
+
+**Create Forms** (`CreateFormFieldOperation`, `core/ops/forms.py`) —
+authoring a *new* field, distinct from Fill Form (which only edits
+values of fields that already exist). Same explicit page+rect approach
+as Sign (no click-to-place canvas yet), and same bottom-left-origin
+rect convention, converted internally to `fitz`'s top-left origin -
+verified against a real PDF (page height 400, rect `(50,300,250,320)`
+came back as `fitz.Rect(50, 80, 250, 100)` exactly as expected, not
+just "didn't raise").
+- Uses `fitz.Widget`/`Page.add_widget()` rather than hand-built pikepdf
+  annotation dictionaries - pikepdf has no "add a field" helper
+  (confirmed while building Flatten), and PyMuPDF's `add_widget()`
+  handles the `/AcroForm` bookkeeping (creating it if absent,
+  registering the field) automatically. Text fields and checkboxes
+  work reliably and are fully tested.
+- **Known, documented limitation**: `field_type="radio"` creates one
+  independent toggle widget, not a member of a mutually-exclusive
+  *group*. Tried building a real shared-field-name radio group first
+  (not assumed to be impossible) - `Widget.update()` validates a
+  shared field name against an already-existing `/Parent /Kids`
+  structure and raises `ValueError: bad xref` for one freshly created
+  from scratch via this PyMuPDF version's `add_widget()`. Rather than
+  ship broken grouping silently, "radio" is documented (module
+  docstring + operation docstring + CLAUDE.md here) as a round-styled
+  independent toggle, same mechanism as a checkbox. Revisit if a
+  future PyMuPDF version supports creating grouped kids directly, or
+  if it's worth hand-building the `/Parent /Kids` structure via
+  pikepdf post-save.
 
 Fill Form / Sign notes:
 - `core/ops/forms.py`'s `FillFormOperation`/`SignOperation` are visual

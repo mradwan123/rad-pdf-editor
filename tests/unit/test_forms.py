@@ -13,6 +13,7 @@ import pytest
 from core.errors import OperationError
 from core.model.document import DocumentSession
 from core.ops.forms import (
+    CreateFormFieldOperation,
     FillFormOperation,
     FlattenOperation,
     RemoveAnnotationsOperation,
@@ -347,3 +348,134 @@ def test_sign_undo_removes_the_image(tmp_path: Path) -> None:
     result = doc.apply(SignOperation(image_path=sig, page=1, rect=(50, 50, 250, 130)))
     restored = result.undo()
     assert not _has_ink(restored.working_path, page=0)
+
+
+def _widgets(path: Path, page: int = 0) -> list[fitz.Widget]:
+    with fitz.open(path) as pdf:
+        return list(pdf[page].widgets())
+
+
+def test_create_text_field_adds_a_fillable_field(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    result = doc.apply(
+        CreateFormFieldOperation(
+            page=1,
+            field_name="full_name",
+            field_type="text",
+            rect=(50, 300, 250, 320),
+            default_value="Jane Doe",
+        )
+    )
+    widgets = _widgets(result.working_path, page=0)
+    assert len(widgets) == 1
+    assert widgets[0].field_name == "full_name"
+    assert widgets[0].field_type_string == "Text"
+    assert widgets[0].field_value == "Jane Doe"
+
+
+def test_create_checkbox_field_sets_initial_checked_state(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    result = doc.apply(
+        CreateFormFieldOperation(
+            page=1,
+            field_name="agree",
+            field_type="checkbox",
+            rect=(50, 260, 70, 280),
+            checked=True,
+        )
+    )
+    widgets = _widgets(result.working_path, page=0)
+    assert widgets[0].field_type_string == "CheckBox"
+    assert widgets[0].field_value not in (False, "Off", None)
+
+
+def test_create_checkbox_field_defaults_to_unchecked(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    result = doc.apply(
+        CreateFormFieldOperation(
+            page=1, field_name="agree", field_type="checkbox", rect=(50, 260, 70, 280)
+        )
+    )
+    widgets = _widgets(result.working_path, page=0)
+    assert widgets[0].field_value in (False, "Off", None)
+
+
+def test_create_radio_field_adds_a_toggle_widget(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    result = doc.apply(
+        CreateFormFieldOperation(
+            page=1, field_name="choice", field_type="radio", rect=(50, 220, 70, 240)
+        )
+    )
+    widgets = _widgets(result.working_path, page=0)
+    assert widgets[0].field_type_string == "RadioButton"
+
+
+def test_create_form_field_places_on_the_correct_page(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    result = doc.apply(
+        CreateFormFieldOperation(
+            page=2, field_name="on_page_2", field_type="text", rect=(50, 300, 250, 320)
+        )
+    )
+    assert _widgets(result.working_path, page=0) == []
+    assert len(_widgets(result.working_path, page=1)) == 1
+
+
+def test_create_form_field_rejects_invalid_field_type(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    with pytest.raises(OperationError):
+        doc.apply(
+            CreateFormFieldOperation(
+                page=1, field_name="x", field_type="dropdown", rect=(0, 0, 100, 20)
+            )
+        )
+
+
+def test_create_form_field_rejects_empty_field_name(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    with pytest.raises(OperationError):
+        doc.apply(
+            CreateFormFieldOperation(page=1, field_name="  ", field_type="text", rect=(0, 0, 100, 20))
+        )
+
+
+def test_create_form_field_rejects_degenerate_rect(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    with pytest.raises(OperationError):
+        doc.apply(
+            CreateFormFieldOperation(
+                page=1, field_name="x", field_type="text", rect=(100, 100, 100, 100)
+            )
+        )
+
+
+def test_create_form_field_rejects_out_of_range_page(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    with pytest.raises(OperationError):
+        doc.apply(
+            CreateFormFieldOperation(
+                page=99, field_name="x", field_type="text", rect=(0, 0, 100, 20)
+            )
+        )
+
+
+def test_create_form_field_with_no_document_open_raises() -> None:
+    doc = DocumentSession(working_path=None, source_path=None)
+    with pytest.raises(OperationError):
+        doc.apply(
+            CreateFormFieldOperation(
+                page=1, field_name="x", field_type="text", rect=(0, 0, 100, 20)
+            )
+        )
+
+
+def test_create_form_field_undo_removes_the_field(tmp_path: Path) -> None:
+    doc = _sign_session(tmp_path)
+    result = doc.apply(
+        CreateFormFieldOperation(
+            page=1, field_name="full_name", field_type="text", rect=(50, 300, 250, 320)
+        )
+    )
+    restored = result.undo()
+    assert _widgets(restored.working_path, page=0) == []

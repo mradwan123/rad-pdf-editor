@@ -36,6 +36,7 @@ from gui.controller import AppController
 from gui.dialogs.base_tool_dialog import BaseToolDialog
 from gui.dialogs.bates_numbering_dialog import BatesNumberingDialog
 from gui.dialogs.compress_dialog import CompressDialog
+from gui.dialogs.create_form_field_dialog import CreateFormFieldDialog
 from gui.dialogs.crop_dialog import CropDialog
 from gui.dialogs.delete_pages_dialog import DeletePagesDialog
 from gui.dialogs.extract_pages_dialog import ExtractPagesDialog
@@ -90,6 +91,7 @@ _TOOL_DIALOGS: dict[str, _DialogFactory] = {
     "flatten": FlattenDialog,
     "remove_annotations": RemoveAnnotationsDialog,
     "sign": SignDialog,
+    "create_form_field": CreateFormFieldDialog,
     # FillFormDialog's __init__ takes (field_names, parent), not just
     # (parent) - it needs the open document's actual AcroForm field
     # names before it can lay out its inputs. _run_tool special-cases

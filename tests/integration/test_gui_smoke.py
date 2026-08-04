@@ -22,6 +22,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox
 
 from gui.dialogs.bates_numbering_dialog import BatesNumberingDialog
+from gui.dialogs.create_form_field_dialog import CreateFormFieldDialog
 from gui.dialogs.crop_dialog import CropDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
 from gui.dialogs.merge_dialog import MergeDialog
@@ -228,6 +229,7 @@ def test_phase2_tools_are_all_registered_in_the_menu(qapp: QApplication) -> None
         "remove_annotations",
         "fill_form",
         "sign",
+        "create_form_field",
     ):
         assert tool_id in window.tool_actions
     window.close()
@@ -366,6 +368,40 @@ def test_sign_via_tools_menu_places_image(qapp: QApplication, tmp_path: Path) ->
 
     with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
         assert len(pdf.pages) == 1
+    assert window.undo_action.isEnabled()
+    window.controller.close_session()
+    window.close()
+
+
+def test_create_form_field_via_tools_menu_adds_a_text_field(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    import fitz
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+
+    def fake_create(self: CreateFormFieldDialog) -> QDialog.DialogCode:
+        self.field_name.setText("full_name")
+        self.field_type.setCurrentText("text")
+        self.page.setValue(1)
+        self.x0.setValue(50)
+        self.y0.setValue(300)
+        self.x1.setValue(250)
+        self.y1.setValue(320)
+        self.default_value.setText("Jane Doe")
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(CreateFormFieldDialog, "exec", fake_create):
+        window._run_tool("create_form_field", CreateFormFieldDialog)
+
+    with fitz.open(window.controller.doc.working_path) as pdf:
+        widgets = list(pdf[0].widgets())
+    assert len(widgets) == 1
+    assert widgets[0].field_name == "full_name"
+    assert widgets[0].field_value == "Jane Doe"
     assert window.undo_action.isEnabled()
     window.controller.close_session()
     window.close()

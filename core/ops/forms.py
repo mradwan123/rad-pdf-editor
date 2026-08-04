@@ -24,6 +24,24 @@ editor); Fill takes explicit field name/value pairs (see
 `list_form_field_names` for discovering names) and Sign takes an
 explicit page + rect, both things a future interactive canvas would
 compute for the user rather than replace.
+
+Create Forms (`CreateFormFieldOperation`) is the remaining Phase 2
+item: authoring a brand-new field, a different feature from Fill Form
+(which only edits values of fields that already exist). Same
+explicit-page-and-rect approach as Sign, same reasoning. Uses
+`fitz.Widget` rather than hand-built pikepdf annotation dictionaries -
+pikepdf has no "add an annotation/field" helper (confirmed while
+building Flatten), and PyMuPDF's `Page.add_widget()` handles the
+/AcroForm bookkeeping (creating it if absent, registering the field)
+automatically. Text fields and checkboxes work reliably; true radio
+button *groups* (multiple widgets sharing one field name, mutually
+exclusive) do not - `Widget.update()` validates a shared field name
+against an already-existing `/Parent /Kids` structure and raises "bad
+xref" for a freshly-created one (confirmed empirically, not assumed).
+So "radio" fields are each their own independent field_name - a
+round-styled toggle that behaves like a checkbox, not a grouped radio
+button. Documented here and in the operation's docstring rather than
+silently shipped as if grouping worked.
 """
 
 from __future__ import annotations
@@ -291,6 +309,99 @@ class SignOperation(Operation):
         return f"Placed signature on page {self.page}"
 
 
+_FIELD_TYPES = ("text", "checkbox", "radio")
+
+
+@dataclass
+class CreateFormFieldOperation(Operation):
+    """Adds one new AcroForm field to `page` (1-indexed) at `rect`
+    (x0, y0, x1, y1 - PDF-native points, origin bottom-left, consistent
+    with every other op's coordinates in this package).
+
+    `field_type` is "text", "checkbox", or "radio". For "text",
+    `default_value` seeds the field's initial text. For "checkbox" and
+    "radio", `checked` seeds its initial state.
+
+    Known limitation: "radio" is one independent toggle field, not a
+    member of a mutually-exclusive group - see this module's docstring
+    for why grouped radio buttons aren't supported yet.
+    """
+
+    page: int
+    field_name: str
+    field_type: str
+    rect: tuple[float, float, float, float]
+    default_value: str = ""
+    checked: bool = False
+    _pre_snapshot: bytes | None = field(default=None, init=False, repr=False)
+
+    def apply(self, doc: DocumentSession) -> DocumentSession:
+        _require_working_pdf(doc)
+        assert doc.working_path is not None
+        if self.field_type not in _FIELD_TYPES:
+            raise OperationError(
+                f"field_type must be one of {_FIELD_TYPES}, got '{self.field_type}'."
+            )
+        if not self.field_name.strip():
+            raise OperationError("field_name must not be empty.")
+        x0, y0, x1, y1 = self.rect
+        if x1 <= x0 or y1 <= y0:
+            raise OperationError("rect must have x1 > x0 and y1 > y0.")
+        self._pre_snapshot = read_working_bytes(doc)
+
+        out_path = allocate_working_path(doc)
+        try:
+            with fitz.open(doc.working_path) as pdf:
+                total = pdf.page_count
+                if not (1 <= self.page <= total):
+                    raise OperationError(
+                        f"Page {self.page} is out of range (document has {total} pages)."
+                    )
+                target_page = pdf[self.page - 1]
+                page_height = target_page.rect.height
+                # fitz's own Rect is top-left-origin (y grows downward) -
+                # convert from this package's bottom-left convention.
+                placement = fitz.Rect(x0, page_height - y1, x1, page_height - y0)
+
+                widget = fitz.Widget()
+                widget.field_name = self.field_name
+                widget.rect = placement
+                if self.field_type == "text":
+                    widget.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+                    widget.field_value = self.default_value
+                else:
+                    widget.field_type = (
+                        fitz.PDF_WIDGET_TYPE_CHECKBOX
+                        if self.field_type == "checkbox"
+                        else fitz.PDF_WIDGET_TYPE_RADIOBUTTON
+                    )
+                    widget.field_value = self.checked
+                target_page.add_widget(widget)
+                pdf.save(out_path)
+        except (RuntimeError, ValueError) as exc:
+            raise OperationError(f"Could not create form field: {exc}") from exc
+
+        return next_session(doc, out_path)
+
+    def invert(self) -> Operation:
+        return snapshot_restore_invert(self._pre_snapshot, self.describe())
+
+    def serialize(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "type": "create_form_field",
+            "page": self.page,
+            "field_name": self.field_name,
+            "field_type": self.field_type,
+            "rect": list(self.rect),
+            "default_value": self.default_value,
+            "checked": self.checked,
+        }
+
+    def describe(self) -> str:
+        return f"Added {self.field_type} field '{self.field_name}' on page {self.page}"
+
+
 class FlattenPlugin(ToolPlugin):
     tool_id = "flatten"
     display_name = "Flatten"
@@ -350,3 +461,31 @@ class SignPlugin(ToolPlugin):
 
     def operation_class(self) -> type[Operation]:
         return SignOperation
+
+
+class CreateFormFieldPlugin(ToolPlugin):
+    tool_id = "create_form_field"
+    display_name = "Create Form Field"
+    compatible_core_version = CORE_VERSION_RANGE
+
+    def build_operation(self, **kwargs: Any) -> Operation:
+        try:
+            page = kwargs["page"]
+            field_name = kwargs["field_name"]
+            field_type = kwargs["field_type"]
+            rect = kwargs["rect"]
+        except KeyError as exc:
+            raise OperationError(
+                "Create Form Field requires 'page', 'field_name', 'field_type', and 'rect'."
+            ) from exc
+        return CreateFormFieldOperation(
+            page=page,
+            field_name=field_name,
+            field_type=field_type,
+            rect=tuple(rect),
+            default_value=str(kwargs.get("default_value", "")),
+            checked=bool(kwargs.get("checked", False)),
+        )
+
+    def operation_class(self) -> type[Operation]:
+        return CreateFormFieldOperation
