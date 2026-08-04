@@ -666,3 +666,48 @@ def test_thumbnail_context_menu_does_nothing_without_a_selection(
     mock_exec.assert_not_called()
     window.controller.close_session()
     window.close()
+
+
+# --- busy-cursor feedback ----------------------------------------------------
+
+
+def test_busy_cursor_sets_wait_cursor_and_restores_it_after(qapp: QApplication) -> None:
+    window = MainWindow()
+    assert QApplication.overrideCursor() is None
+
+    with window._busy_cursor():
+        assert QApplication.overrideCursor() is not None
+        assert QApplication.overrideCursor().shape() == Qt.CursorShape.WaitCursor
+
+    assert QApplication.overrideCursor() is None
+    window.close()
+
+
+def test_busy_cursor_restores_cursor_even_on_exception(qapp: QApplication) -> None:
+    window = MainWindow()
+
+    with pytest.raises(RuntimeError), window._busy_cursor():
+        raise RuntimeError("boom")
+
+    assert QApplication.overrideCursor() is None
+    window.close()
+
+
+def test_running_a_tool_leaves_no_override_cursor_set_afterward(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+
+    def fake_exec(self: RotateDialog) -> QDialog.DialogCode:
+        self.angle.setCurrentText("180")
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(RotateDialog, "exec", fake_exec):
+        window._run_tool("rotate_pages", RotateDialog)
+
+    assert QApplication.overrideCursor() is None
+    window.controller.close_session()
+    window.close()

@@ -4,7 +4,8 @@ framework")."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from PySide6.QtCore import QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QLabel,
     QListWidget,
@@ -220,6 +222,19 @@ class MainWindow(QMainWindow):
     def _make_tool_handler(self, tool_id: str, dialog_cls: _DialogFactory) -> Any:
         return lambda: self._run_tool(tool_id, dialog_cls)
 
+    @contextmanager
+    def _busy_cursor(self) -> Iterator[None]:
+        """Visual feedback around a synchronous operation that might
+        take a moment (large PDFs, compress, N-up rendering, etc.) -
+        deliberately not a background-thread rewrite, just making the
+        otherwise-unresponsive-looking wait visible rather than silent."""
+        self.statusBar().showMessage(self.tr("Working..."))
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            yield
+        finally:
+            QApplication.restoreOverrideCursor()
+
     # --- document lifecycle ----------------------------------------------
 
     def _open_document(self) -> None:
@@ -334,7 +349,8 @@ class MainWindow(QMainWindow):
 
     def _undo(self) -> None:
         try:
-            self.controller.undo()
+            with self._busy_cursor():
+                self.controller.undo()
         except PDFEditorError as exc:
             self._show_error(exc)
             return
@@ -342,7 +358,8 @@ class MainWindow(QMainWindow):
 
     def _redo(self) -> None:
         try:
-            self.controller.redo()
+            with self._busy_cursor():
+                self.controller.redo()
         except PDFEditorError as exc:
             self._show_error(exc)
             return
@@ -367,7 +384,8 @@ class MainWindow(QMainWindow):
         try:
             plugin = self.controller.get_plugin(tool_id)
             operation = plugin.build_operation(**dialog.values())
-            self.controller.apply_operation(operation)
+            with self._busy_cursor():
+                self.controller.apply_operation(operation)
         except PDFEditorError as exc:
             self._show_error(exc)
             return
@@ -452,7 +470,8 @@ class MainWindow(QMainWindow):
         try:
             plugin = self.controller.get_plugin("reorder_pages")
             operation = plugin.build_operation(page_order=page_order)
-            self.controller.apply_operation(operation)
+            with self._busy_cursor():
+                self.controller.apply_operation(operation)
         except PDFEditorError as exc:
             self._show_error(exc)
         # Refresh either way: on success this rebuilds thumbnails from
@@ -485,7 +504,8 @@ class MainWindow(QMainWindow):
         try:
             plugin = self.controller.get_plugin("rotate_pages")
             operation = plugin.build_operation(angle=angle, pages=pages)
-            self.controller.apply_operation(operation)
+            with self._busy_cursor():
+                self.controller.apply_operation(operation)
         except PDFEditorError as exc:
             self._show_error(exc)
             return
@@ -495,7 +515,8 @@ class MainWindow(QMainWindow):
         try:
             plugin = self.controller.get_plugin("delete_pages")
             operation = plugin.build_operation(pages=pages)
-            self.controller.apply_operation(operation)
+            with self._busy_cursor():
+                self.controller.apply_operation(operation)
         except PDFEditorError as exc:
             self._show_error(exc)
             return
