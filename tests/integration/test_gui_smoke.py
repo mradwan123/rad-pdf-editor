@@ -17,7 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pikepdf
 import pytest
-from PySide6.QtCore import QModelIndex, QPoint, Qt
+from PySide6.QtCore import QModelIndex, QPoint, QSize, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox
@@ -1166,3 +1166,585 @@ def test_run_workflow_records_every_step_in_the_audit_log(
     assert [e["operation"]["type"] for e in entries] == ["rotate_pages", "watermark"]
     assert all(e["document"] == str(out) for e in entries)
     window.close()
+
+
+# --- multi-document tabs -----------------------------------------------------
+#
+# The point of these is per-tab *isolation* being real, not just
+# rendered: an operation applied in one tab must leave the other tab's
+# DocumentSession, undo/redo stack, working file and session temp dir
+# genuinely untouched, checked against the actual PDFs and directories
+# rather than against the UI's own idea of what happened.
+
+
+def test_two_tabs_have_genuinely_independent_undo_stacks(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    a = _make_pdf(tmp_path / "a.pdf", 2)
+    b = _make_pdf(tmp_path / "b.pdf", 3)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+
+    assert tab_a is not tab_b
+    assert tab_a.controller is not tab_b.controller
+    # Separate private session dirs, not one shared scratch space.
+    assert tab_a.controller.doc.working_path.parent != tab_b.controller.doc.working_path.parent
+
+    window.tab_widget.setCurrentWidget(tab_a)
+    window.controller.apply_operation(RotatePagesOperation(angle=90))
+    window._refresh()
+
+    # Tab A changed...
+    with pikepdf.Pdf.open(tab_a.controller.doc.working_path) as pdf:
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 90
+    assert len(tab_a.controller.doc.operation_log) == 1
+    # ...and tab B did not, at every level: log, redo stack, and the
+    # actual bytes of its own working file.
+    assert tab_b.controller.doc.operation_log == []
+    assert tab_b.controller.doc.redo_stack == []
+    assert not tab_b.controller.is_dirty
+    with pikepdf.Pdf.open(tab_b.controller.doc.working_path) as pdf:
+        assert len(pdf.pages) == 3
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 0
+
+    window._undo()
+
+    assert tab_a.controller.doc.operation_log == []
+    assert len(tab_a.controller.doc.redo_stack) == 1
+    with pikepdf.Pdf.open(tab_a.controller.doc.working_path) as pdf:
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 0
+    # The undo in A must not have reached into B's stack either.
+    assert tab_b.controller.doc.operation_log == []
+    assert tab_b.controller.doc.redo_stack == []
+
+    # Undo/redo actions reflect whichever tab is active.
+    window.tab_widget.setCurrentWidget(tab_b)
+    assert not window.undo_action.isEnabled()
+    assert not window.redo_action.isEnabled()
+    window.tab_widget.setCurrentWidget(tab_a)
+    assert window.redo_action.isEnabled()
+
+    _force_close(window)
+
+
+def test_each_tab_tracks_its_own_dirty_state_and_tab_label(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+
+    assert window.tab_widget.tabText(0) == "a.pdf"
+    assert window.tab_widget.tabText(1) == "b.pdf"
+
+    window.tab_widget.setCurrentWidget(tab_a)
+    window.controller.apply_operation(RotatePagesOperation(angle=90))
+    window._refresh()
+
+    assert tab_a.controller.is_dirty
+    assert not tab_b.controller.is_dirty
+    assert window.tab_widget.tabText(0).startswith("•")
+    assert "a.pdf" in window.tab_widget.tabText(0)
+    assert window.tab_widget.tabText(1) == "b.pdf"
+
+    out = tmp_path / "saved.pdf"
+    with patch("gui.main_window.QFileDialog.getSaveFileName", return_value=(str(out), "")):
+        assert window._save_as(tab_a)
+
+    assert not tab_a.controller.is_dirty
+    assert window.tab_widget.tabText(0) == "a.pdf"
+    _force_close(window)
+
+
+def test_closing_a_tab_wipes_only_that_tabs_session(qapp: QApplication, tmp_path: Path) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 2)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+    session_a = tab_a.controller.doc.working_path.parent
+    session_b = tab_b.controller.doc.working_path.parent
+    assert session_a.exists()
+    assert session_b.exists()
+
+    window._close_tab(window.tab_widget.indexOf(tab_a))
+
+    assert not session_a.exists()  # securely wiped now, not at app exit
+    assert session_b.exists()
+    assert window.tab_widget.count() == 1
+    assert window.current_tab is tab_b
+
+    # The surviving tab still works normally afterwards - the wipe
+    # didn't take anything it needed with it.
+    window.controller.apply_operation(RotatePagesOperation(angle=180))
+    window._refresh()
+    with pikepdf.Pdf.open(tab_b.controller.doc.working_path) as pdf:
+        assert len(pdf.pages) == 2
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 180
+    assert window.thumbnail_list.count() == 2
+    _force_close(window)
+
+
+def test_close_other_tabs_dirty_checks_each_closed_tab(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    c = _make_pdf(tmp_path / "c.pdf", 1)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+    tab_c = _open_tab(window, c)
+
+    # A mix of clean and dirty: only the dirty one should be asked about.
+    window.tab_widget.setCurrentWidget(tab_a)
+    window.controller.apply_operation(RotatePagesOperation(angle=90))
+    session_a = tab_a.controller.doc.working_path.parent
+    session_c = tab_c.controller.doc.working_path.parent
+
+    with patch.object(
+        QMessageBox, "warning", return_value=QMessageBox.StandardButton.Discard
+    ) as mock_warning:
+        assert window._close_other_tabs(window.tab_widget.indexOf(tab_b))
+
+    mock_warning.assert_called_once()  # tab_a only; tab_c was clean
+    assert window.tab_widget.count() == 1
+    assert window.current_tab is tab_b
+    assert not session_a.exists()
+    assert not session_c.exists()
+    _force_close(window)
+
+
+def test_close_all_tabs_cancelled_on_a_dirty_tab_keeps_it_open(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    window = MainWindow()
+    _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+    window.controller.apply_operation(RotatePagesOperation(angle=90))
+
+    with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Cancel):
+        assert not window._close_all_tabs()
+
+    # The clean tab ahead of it did close; the cancelled one stayed.
+    assert window.tab_widget.count() == 1
+    assert window.current_tab is tab_b
+    assert tab_b.controller.is_dirty
+    _force_close(window)
+
+
+def test_window_close_checks_every_tab_not_only_the_active_one(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+
+    # Dirty the *background* tab, then leave a clean tab active: the
+    # old single-document closeEvent would have seen nothing to lose.
+    window.tab_widget.setCurrentWidget(tab_a)
+    window.controller.apply_operation(RotatePagesOperation(angle=90))
+    window.tab_widget.setCurrentWidget(tab_b)
+    assert not window.controller.is_dirty
+
+    event = QCloseEvent()
+    with patch.object(
+        QMessageBox, "warning", return_value=QMessageBox.StandardButton.Cancel
+    ) as mock_warning:
+        window.closeEvent(event)
+
+    mock_warning.assert_called_once()
+    assert not event.isAccepted()
+    assert tab_a in window.tabs()
+    _force_close(window)
+
+
+def test_tabs_can_be_reordered_and_keep_their_own_documents(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    # tabBar().moveTab(...) is the same call Qt makes at the end of a
+    # real drag-to-reorder gesture - real drags aren't reliably
+    # simulatable under QT_QPA_PLATFORM=offscreen (see
+    # test_dragging_a_thumbnail_reorders_the_document).
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 2)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+    assert window.tab_widget.isMovable()
+    assert window.tabs() == [tab_a, tab_b]
+
+    window.tab_widget.tabBar().moveTab(0, 1)
+
+    assert window.tabs() == [tab_b, tab_a]
+    assert window.tab_widget.tabText(0) == "b.pdf"
+    assert window.tab_widget.tabText(1) == "a.pdf"
+    # Reordering is presentation only - each tab still owns its own
+    # document and working file.
+    assert tab_a.controller.doc.source_path == a
+    assert tab_b.controller.doc.source_path == b
+    with pikepdf.Pdf.open(tab_b.controller.doc.working_path) as pdf:
+        assert len(pdf.pages) == 2
+    _force_close(window)
+
+
+def test_ctrl_tab_cycles_through_tabs_in_both_directions(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    paths = [
+        _make_pdf(tmp_path / "a.pdf", 1),
+        _make_pdf(tmp_path / "b.pdf", 1),
+        _make_pdf(tmp_path / "c.pdf", 1),
+    ]
+    window = MainWindow()
+    for path in paths:
+        _open_tab(window, path)
+
+    assert window.next_tab_action.shortcut().toString() == "Ctrl+Tab"
+    assert window.previous_tab_action.shortcut().toString() == "Ctrl+Shift+Tab"
+
+    window.tab_widget.setCurrentIndex(0)
+    window.next_tab_action.trigger()
+    assert window.tab_widget.currentIndex() == 1
+    window.next_tab_action.trigger()
+    window.next_tab_action.trigger()
+    assert window.tab_widget.currentIndex() == 0  # wraps around
+
+    window.previous_tab_action.trigger()
+    assert window.tab_widget.currentIndex() == 2  # wraps the other way
+    _force_close(window)
+
+
+def test_ctrl_w_closes_only_the_current_tab(qapp: QApplication, tmp_path: Path) -> None:
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+
+    assert window.close_action.shortcut().toString() == "Ctrl+W"
+    window.tab_widget.setCurrentWidget(tab_a)
+    window.close_action.trigger()
+
+    assert window.tabs() == [tab_b]
+    _force_close(window)
+
+
+def test_opening_with_no_tabs_open_skips_the_placement_prompt(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+
+    with patch.object(TabPlacementDialog, "exec") as mock_exec:
+        window._open_document_path(src)
+
+    mock_exec.assert_not_called()  # nothing to replace, nothing ambiguous
+    assert window.tab_widget.count() == 1
+    assert window.controller.doc.source_path == src
+    _force_close(window)
+
+
+def test_opening_a_second_document_in_a_new_tab_keeps_the_first(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 2)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    session_a = tab_a.controller.doc.working_path.parent
+
+    with patch.object(TabPlacementDialog, "exec", _fake_placement(PLACEMENT_NEW_TAB)):
+        window._open_document_path(b)
+
+    assert window.tab_widget.count() == 2
+    assert tab_a.controller.doc.source_path == a
+    assert session_a.exists()
+    assert window.controller.doc.source_path == b
+    _force_close(window)
+
+
+def test_replace_current_tab_replaces_only_that_tab(qapp: QApplication, tmp_path: Path) -> None:
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    c = _make_pdf(tmp_path / "c.pdf", 3)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+    old_session_b = tab_b.controller.doc.working_path.parent
+
+    with patch.object(TabPlacementDialog, "exec", _fake_placement(PLACEMENT_REPLACE_CURRENT)):
+        window._open_document_path(c)
+
+    assert window.tab_widget.count() == 2
+    assert window.current_tab is tab_b
+    assert tab_b.controller.doc.source_path == c
+    assert not old_session_b.exists()  # the replaced document's scratch space is wiped
+    assert tab_a.controller.doc.source_path == a  # untouched
+    assert window.tab_widget.tabText(window.tab_widget.indexOf(tab_b)) == "c.pdf"
+    _force_close(window)
+
+
+def test_cancelling_the_placement_prompt_opens_nothing(qapp: QApplication, tmp_path: Path) -> None:
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    window = MainWindow()
+    _open_tab(window, a)
+
+    def fake_cancel(self: TabPlacementDialog) -> QDialog.DialogCode:
+        return QDialog.DialogCode.Rejected
+
+    with patch.object(TabPlacementDialog, "exec", fake_cancel):
+        window._open_document_path(b)
+
+    assert window.tab_widget.count() == 1
+    assert window.controller.doc.source_path == a
+    assert window.recent_files.list() == [a]
+    _force_close(window)
+
+
+def test_a_failed_open_in_a_new_tab_does_not_strand_an_empty_tab(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    window = MainWindow()
+    _open_tab(window, a)
+
+    with (
+        patch.object(TabPlacementDialog, "exec", _fake_placement(PLACEMENT_NEW_TAB)),
+        patch.object(QMessageBox, "critical") as mock_critical,
+    ):
+        window._open_document_path(tmp_path / "does-not-exist.pdf")
+
+    mock_critical.assert_called_once()
+    assert window.tab_widget.count() == 1
+    assert window.controller.doc.source_path == a
+    _force_close(window)
+
+
+def test_a_tool_applies_only_to_the_active_tab(qapp: QApplication, tmp_path: Path) -> None:
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+
+    def fake_exec(self: RotateDialog) -> QDialog.DialogCode:
+        self.angle.setCurrentText("180")
+        return QDialog.DialogCode.Accepted
+
+    window.tab_widget.setCurrentWidget(tab_b)
+    with patch.object(RotateDialog, "exec", fake_exec):
+        window._run_tool("rotate_pages", RotateDialog)
+
+    with pikepdf.Pdf.open(tab_b.controller.doc.working_path) as pdf:
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 180
+    with pikepdf.Pdf.open(tab_a.controller.doc.working_path) as pdf:
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 0
+    assert tab_a.controller.doc.operation_log == []
+    _force_close(window)
+
+
+def test_thumbnail_context_menu_acts_on_the_tab_it_came_from(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    a = _make_pdf(tmp_path / "a.pdf", 2)
+    b = _make_pdf(tmp_path / "b.pdf", 2)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+
+    window._apply_thumbnail_delete(tab_a, [1])
+
+    with pikepdf.Pdf.open(tab_a.controller.doc.working_path) as pdf:
+        assert len(pdf.pages) == 1
+    with pikepdf.Pdf.open(tab_b.controller.doc.working_path) as pdf:
+        assert len(pdf.pages) == 2
+    _force_close(window)
+
+
+def test_a_new_tab_uses_the_current_window_level_zoom(qapp: QApplication, tmp_path: Path) -> None:
+    # Decision: zoom is window-level, not per-tab.
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    window.zoom_in_action.trigger()
+    zoomed = QSize(window.thumbnail_size)
+
+    tab_b = _open_tab(window, b)
+
+    assert tab_b.thumbnail_list.iconSize() == zoomed
+    assert tab_b.thumbnail_list.item(0).icon().actualSize(zoomed) == zoomed
+    # ...and switching back re-renders the first tab at the same size,
+    # rather than leaving it at the size it was opened with.
+    window.tab_widget.setCurrentWidget(tab_a)
+    assert tab_a.thumbnail_list.iconSize() == zoomed
+    assert tab_a.thumbnail_list.item(0).icon().actualSize(zoomed) == zoomed
+    _force_close(window)
+
+
+def test_run_workflow_touches_no_tab_and_opens_none(qapp: QApplication, tmp_path: Path) -> None:
+    from core.model.pipeline import Pipeline
+    from core.registry.registry import Registry, discover_and_load
+    from core.session.workflow_store import WorkflowStore
+
+    registry = Registry()
+    discover_and_load(registry)
+    rotate = registry.get("rotate_pages").build_operation(angle=90, pages=[])
+    WorkflowStore().save(Pipeline(name="gui_multitab_run", operations=[rotate]))
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    out = tmp_path / "out.pdf"
+
+    window = MainWindow()
+    tab_a = _open_tab(window, _make_pdf(tmp_path / "a.pdf", 1))
+    tab_b = _open_tab(window, _make_pdf(tmp_path / "b.pdf", 1))
+
+    def fake_exec(self: RunWorkflowDialog) -> QDialog.DialogCode:
+        self.workflow_combo.setCurrentText("gui_multitab_run")
+        self._input_path = src
+        self._output_path = out
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(RunWorkflowDialog, "exec", fake_exec):
+        window._run_workflow()
+
+    assert out.exists()
+    with pikepdf.Pdf.open(out) as pdf:
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 90
+    # No tab opened, and no tab's document, undo stack or dirty flag
+    # touched - Run Workflow is batch replay, not live editing.
+    assert window.tab_widget.count() == 2
+    for tab in (tab_a, tab_b):
+        assert tab.controller.doc.operation_log == []
+        assert not tab.controller.is_dirty
+        with pikepdf.Pdf.open(tab.controller.doc.working_path) as pdf:
+            assert int(pdf.pages[0].get("/Rotate", 0)) == 0
+    _force_close(window)
+
+
+# --- crash recovery (most recently active tab only) --------------------------
+
+
+def _crashed_window_with_two_dirty_tabs(tmp_path: Path) -> tuple[MainWindow, Path, Path]:
+    """Two edited tabs, then the window is abandoned without ever
+    closing a session - i.e. exactly what a crash leaves behind (a
+    clean exit would have discarded every journal)."""
+    from core.ops.organize import RotatePagesOperation
+
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    window.controller.apply_operation(RotatePagesOperation(angle=90))
+    tab_b = _open_tab(window, b)
+    window.controller.apply_operation(RotatePagesOperation(angle=180))
+    # Back to A, so A - not the most recently *opened* tab - is the
+    # most recently active one.
+    window.tab_widget.setCurrentWidget(tab_a)
+    assert tab_b.controller.is_dirty
+    return window, a, b
+
+
+def test_autosave_restores_only_the_most_recently_active_tab(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    crashed, a, _b = _crashed_window_with_two_dirty_tabs(tmp_path)
+
+    window = MainWindow()
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+        restored = window.restore_autosaved_session()
+
+    assert restored
+    assert window.tab_widget.count() == 1  # one tab, not both
+    tab = window.current_tab
+    assert tab.controller.doc.source_path == a
+    # Restored *unsaved* state (the 90-degree rotation that was never
+    # written back to a.pdf), not a re-open of the original file.
+    assert tab.controller.is_dirty
+    with pikepdf.Pdf.open(tab.controller.doc.working_path) as pdf:
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 90
+    with pikepdf.Pdf.open(a) as pdf:
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 0
+
+    _force_close(window)
+    _force_close(crashed)
+
+
+def test_a_restored_session_is_not_offered_again_next_launch(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from core.session.autosave import recover_active_session
+
+    crashed, _a, _b = _crashed_window_with_two_dirty_tabs(tmp_path)
+
+    window = MainWindow()
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+        window.restore_autosaved_session()
+    _force_close(window)
+
+    next_launch = MainWindow()
+    with patch.object(QMessageBox, "question") as mock_question:
+        assert not next_launch.restore_autosaved_session()
+    mock_question.assert_not_called()
+    assert recover_active_session() is None
+    next_launch.close()
+    _force_close(crashed)
+
+
+def test_declining_recovery_opens_nothing_and_discards_the_journal(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from core.session.autosave import recover_active_session
+
+    crashed, _a, _b = _crashed_window_with_two_dirty_tabs(tmp_path)
+
+    window = MainWindow()
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
+        assert not window.restore_autosaved_session()
+
+    assert window.tab_widget.count() == 0
+    assert window.stack.currentWidget() is window.empty_state
+    assert recover_active_session() is None
+    window.close()
+    _force_close(crashed)
+
+
+def test_a_clean_shutdown_leaves_nothing_to_recover(qapp: QApplication, tmp_path: Path) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    _open_tab(window, src)
+    window.controller.apply_operation(RotatePagesOperation(angle=90))
+    window.controller.save_as(tmp_path / "out.pdf")
+
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert event.isAccepted()
+
+    next_launch = MainWindow()
+    with patch.object(QMessageBox, "question") as mock_question:
+        assert not next_launch.restore_autosaved_session()
+    mock_question.assert_not_called()
+    next_launch.close()
