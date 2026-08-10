@@ -27,7 +27,9 @@ from gui.dialogs.crop_dialog import CropDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
 from gui.dialogs.merge_dialog import MergeDialog
 from gui.dialogs.rotate_dialog import RotateDialog
+from gui.dialogs.run_workflow_dialog import RunWorkflowDialog
 from gui.dialogs.sign_dialog import SignDialog
+from gui.dialogs.workflow_builder_dialog import WorkflowBuilderDialog
 from gui.main_window import MainWindow
 
 
@@ -745,5 +747,190 @@ def test_running_a_tool_leaves_no_override_cursor_set_afterward(
         window._run_tool("rotate_pages", RotateDialog)
 
     assert QApplication.overrideCursor() is None
+    window.controller.close_session()
+    window.close()
+
+
+# --- Phase 5: Workflow builder + run --------------------------------------
+
+
+def test_workflows_menu_actions_exist_and_are_enabled_without_a_document(
+    qapp: QApplication,
+) -> None:
+    # Building/running a workflow is document-independent by design -
+    # unlike every tool in tool_actions, these two aren't gated on
+    # is_open.
+    window = MainWindow()
+    assert window.build_workflow_action.isEnabled()
+    assert window.run_workflow_action.isEnabled()
+    window.close()
+
+
+def test_build_workflow_saves_a_real_pipeline(qapp: QApplication) -> None:
+    from core.registry.registry import Registry, discover_and_load
+    from core.session.workflow_store import WorkflowStore
+
+    window = MainWindow()
+    registry = Registry()
+    discover_and_load(registry)
+    rotate_op = registry.get("rotate_pages").build_operation(angle=90, pages=[])
+
+    def fake_exec(self: WorkflowBuilderDialog) -> QDialog.DialogCode:
+        self.name_edit.setText("gui_test_workflow")
+        self._operations.append(rotate_op)
+        self.step_list.addItem(rotate_op.describe())
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(WorkflowBuilderDialog, "exec", fake_exec):
+        window._build_workflow()
+
+    assert "gui_test_workflow" in WorkflowStore().list_workflows()
+    window.close()
+
+
+def test_workflow_builder_add_step_excludes_fill_form(qapp: QApplication) -> None:
+    from core.registry.registry import Registry, discover_and_load
+
+    registry = Registry()
+    discover_and_load(registry)
+    dialog = WorkflowBuilderDialog(registry)
+
+    with patch(
+        "gui.dialogs.workflow_builder_dialog.QInputDialog.getItem", return_value=("", False)
+    ) as mock_get_item:
+        dialog._add_step()
+
+    offered_labels = mock_get_item.call_args[0][3]
+    fill_form_display_name = registry.get("fill_form").display_name
+    assert fill_form_display_name not in offered_labels
+    dialog.close()
+
+
+def test_workflow_builder_add_step_builds_and_lists_a_real_operation(qapp: QApplication) -> None:
+    from core.registry.registry import Registry, discover_and_load
+
+    registry = Registry()
+    discover_and_load(registry)
+    dialog = WorkflowBuilderDialog(registry)
+    rotate_display_name = registry.get("rotate_pages").display_name
+
+    def fake_rotate_exec(self: RotateDialog) -> QDialog.DialogCode:
+        self.angle.setCurrentText("90")
+        return QDialog.DialogCode.Accepted
+
+    with (
+        patch(
+            "gui.dialogs.workflow_builder_dialog.QInputDialog.getItem",
+            return_value=(rotate_display_name, True),
+        ),
+        patch.object(RotateDialog, "exec", fake_rotate_exec),
+    ):
+        dialog._add_step()
+
+    assert dialog.step_list.count() == 1
+    assert len(dialog._operations) == 1
+    assert dialog._operations[0].describe() == "Rotated all pages by 90 degrees"
+    dialog.close()
+
+
+def test_workflow_builder_move_up_keeps_list_and_operations_in_sync(qapp: QApplication) -> None:
+    from core.registry.registry import Registry, discover_and_load
+
+    registry = Registry()
+    discover_and_load(registry)
+    dialog = WorkflowBuilderDialog(registry)
+
+    op_a = registry.get("rotate_pages").build_operation(angle=90, pages=[])
+    op_b = registry.get("flip").build_operation(direction="horizontal", pages=[])
+    dialog._operations.extend([op_a, op_b])
+    dialog.step_list.addItem(op_a.describe())
+    dialog.step_list.addItem(op_b.describe())
+
+    dialog.step_list.setCurrentRow(1)
+    dialog._move(-1)
+
+    assert dialog._operations == [op_b, op_a]
+    assert [dialog.step_list.item(i).text() for i in range(2)] == [
+        op_b.describe(),
+        op_a.describe(),
+    ]
+    dialog.close()
+
+
+def test_workflow_builder_accept_rejects_empty_name(qapp: QApplication) -> None:
+    from core.registry.registry import Registry, discover_and_load
+
+    registry = Registry()
+    discover_and_load(registry)
+    dialog = WorkflowBuilderDialog(registry)
+    op = registry.get("rotate_pages").build_operation(angle=90, pages=[])
+    dialog._operations.append(op)
+    dialog.step_list.addItem(op.describe())
+
+    with patch("gui.dialogs.workflow_builder_dialog.QMessageBox.warning") as mock_warning:
+        dialog.accept()
+    mock_warning.assert_called_once()
+    assert dialog.result() != QDialog.DialogCode.Accepted
+    dialog.close()
+
+
+def test_workflow_builder_accept_rejects_zero_steps(qapp: QApplication) -> None:
+    from core.registry.registry import Registry, discover_and_load
+
+    registry = Registry()
+    discover_and_load(registry)
+    dialog = WorkflowBuilderDialog(registry)
+    dialog.name_edit.setText("has_a_name")
+
+    with patch("gui.dialogs.workflow_builder_dialog.QMessageBox.warning") as mock_warning:
+        dialog.accept()
+    mock_warning.assert_called_once()
+    dialog.close()
+
+
+def test_run_workflow_shows_info_when_no_workflows_saved(qapp: QApplication) -> None:
+    window = MainWindow()
+    with patch("gui.main_window.QMessageBox.information") as mock_info:
+        window._run_workflow()
+    mock_info.assert_called_once()
+    window.close()
+
+
+def test_run_workflow_applies_saved_pipeline_without_touching_open_document(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from core.model.pipeline import Pipeline
+    from core.registry.registry import Registry, discover_and_load
+    from core.session.workflow_store import WorkflowStore
+
+    registry = Registry()
+    discover_and_load(registry)
+    rotate = registry.get("rotate_pages").build_operation(angle=90, pages=[])
+    WorkflowStore().save(Pipeline(name="gui_run_test", operations=[rotate]))
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    out = tmp_path / "out.pdf"
+
+    window = MainWindow()
+    # a currently-open, unrelated document - Run Workflow's batch
+    # semantics must leave it completely untouched.
+    other_open = _make_pdf(tmp_path / "other.pdf", 1)
+    window.controller.open_document(other_open)
+    window._refresh()
+    ops_before = len(window.controller.doc.operation_log)
+
+    def fake_exec(self: RunWorkflowDialog) -> QDialog.DialogCode:
+        self.workflow_combo.setCurrentText("gui_run_test")
+        self._input_path = src
+        self._output_path = out
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(RunWorkflowDialog, "exec", fake_exec):
+        window._run_workflow()
+
+    assert out.exists()
+    with pikepdf.Pdf.open(out) as pdf:
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 90
+    assert len(window.controller.doc.operation_log) == ops_before
     window.controller.close_session()
     window.close()

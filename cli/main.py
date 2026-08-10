@@ -31,6 +31,7 @@ from core.registry.registry import Registry, discover_and_load
 from core.security.sandbox import network_lockdown
 from core.session.audit_log import AuditLog
 from core.session.session_dir import SessionTempDir
+from core.session.workflow_store import WorkflowStore
 
 log = get_logger(__name__)
 
@@ -274,6 +275,15 @@ def _build_parser() -> argparse.ArgumentParser:
     repair.add_argument("source", type=Path, help="source (possibly corrupt) PDF file")
     repair.add_argument("-o", "--output", type=Path, required=True)
 
+    sub.add_parser("list-workflows", help="List saved Workflow names")
+
+    run_workflow = sub.add_parser(
+        "run-workflow", help="Run a saved Workflow against a new input file, unattended"
+    )
+    run_workflow.add_argument("name", help="saved workflow name")
+    run_workflow.add_argument("input", type=Path, help="input PDF")
+    run_workflow.add_argument("-o", "--output", type=Path, required=True)
+
     return parser
 
 
@@ -422,6 +432,44 @@ _EXTERNAL_SOURCE_TOOL_IDS = {
     "repair",
 }
 
+def _run_list_workflows() -> int:
+    names = WorkflowStore().list_workflows()
+    if not names:
+        print("No saved workflows.")
+        return 0
+    for name in names:
+        print(name)
+    return 0
+
+
+def _run_workflow(args: argparse.Namespace, registry: Registry) -> int:
+    with network_lockdown(), SessionTempDir() as session:
+        try:
+            pipeline = WorkflowStore().load(args.name, registry)
+
+            working = session.path / f"working{args.input.suffix or '.pdf'}"
+            shutil.copyfile(args.input, working)
+            doc = DocumentSession(working_path=working, source_path=args.input)
+
+            result = pipeline.run(doc)
+            if result.working_path is None:
+                print("Workflow produced no output document.", file=sys.stderr)
+                return 1
+
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(result.working_path, args.output)
+            audit_log = AuditLog()
+            for operation in pipeline.operations:
+                audit_log.record_operation(operation, document_label=str(args.output))
+            print(
+                f"Ran workflow '{args.name}' ({len(pipeline.operations)} step(s)) -> {args.output}"
+            )
+            return 0
+        except (PDFEditorError, OSError) as exc:
+            log.error("Workflow run failed: %s", exc)
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+
 
 def main(argv: list[str] | None = None) -> int:
     configure_logging()
@@ -429,6 +477,15 @@ def main(argv: list[str] | None = None) -> int:
 
     registry = Registry()
     discover_and_load(registry)
+
+    # "list-workflows"/"run-workflow" aren't ToolPlugins (they replay
+    # a saved *sequence* of operations, not apply one), so they're
+    # handled here rather than going through registry.get()/_build_kwargs.
+    if args.tool_id == "list-workflows":
+        return _run_list_workflows()
+    if args.tool_id == "run-workflow":
+        return _run_workflow(args, registry)
+
     plugin = registry.get(args.tool_id)
 
     with network_lockdown(), SessionTempDir() as session:

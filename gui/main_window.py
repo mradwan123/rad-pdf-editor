@@ -4,7 +4,8 @@ framework")."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+import shutil
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -28,106 +29,25 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.errors import PDFEditorError
+from core.errors import OperationError, PDFEditorError
 from core.logging_config import get_logger
+from core.model.document import DocumentSession
 from core.ops.forms import list_form_field_names
 from core.session.recent_files import RecentFiles
+from core.session.session_dir import SessionTempDir
+from core.session.workflow_store import WorkflowStore
 from gui.controller import AppController
 from gui.dialogs.base_tool_dialog import BaseToolDialog
-from gui.dialogs.bates_numbering_dialog import BatesNumberingDialog
-from gui.dialogs.compress_dialog import CompressDialog
-from gui.dialogs.create_form_field_dialog import CreateFormFieldDialog
-from gui.dialogs.crop_dialog import CropDialog
-from gui.dialogs.delete_pages_dialog import DeletePagesDialog
-from gui.dialogs.deskew_dialog import DeskewDialog
-from gui.dialogs.docx_to_pdf_dialog import DocxToPdfDialog
-from gui.dialogs.extract_pages_dialog import ExtractPagesDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
-from gui.dialogs.flatten_dialog import FlattenDialog
-from gui.dialogs.flip_dialog import FlipDialog
-from gui.dialogs.grayscale_dialog import GrayscaleDialog
-from gui.dialogs.header_footer_dialog import HeaderFooterDialog
-from gui.dialogs.html_to_pdf_dialog import HtmlToPdfDialog
-from gui.dialogs.jpg_to_pdf_dialog import JpgToPdfDialog
-from gui.dialogs.merge_dialog import MergeDialog
-from gui.dialogs.metadata_dialog import MetadataDialog
-from gui.dialogs.n_up_dialog import NUpDialog
-from gui.dialogs.ocr_dialog import OcrDialog
-from gui.dialogs.pdf_to_docx_dialog import PdfToDocxDialog
-from gui.dialogs.pdf_to_html_dialog import PdfToHtmlDialog
-from gui.dialogs.pdf_to_jpg_dialog import PdfToJpgDialog
-from gui.dialogs.pdf_to_pptx_dialog import PdfToPptxDialog
-from gui.dialogs.pdf_to_xlsx_dialog import PdfToXlsxDialog
-from gui.dialogs.pptx_to_pdf_dialog import PptxToPdfDialog
-from gui.dialogs.protect_dialog import ProtectDialog
-from gui.dialogs.remove_annotations_dialog import RemoveAnnotationsDialog
-from gui.dialogs.rename_dialog import RenameDialog
-from gui.dialogs.reorder_pages_dialog import ReorderPagesDialog
-from gui.dialogs.repair_dialog import RepairDialog
-from gui.dialogs.resize_dialog import ResizeDialog
-from gui.dialogs.rotate_dialog import RotateDialog
-from gui.dialogs.sign_dialog import SignDialog
-from gui.dialogs.unlock_dialog import UnlockDialog
-from gui.dialogs.watermark_dialog import WatermarkDialog
-from gui.dialogs.xlsx_to_pdf_dialog import XlsxToPdfDialog
+from gui.dialogs.run_workflow_dialog import RunWorkflowDialog
+from gui.dialogs.tool_dialog_registry import TOOL_DIALOGS, DialogFactory
+from gui.dialogs.workflow_builder_dialog import WorkflowBuilderDialog
 from gui.resources import build_logo_pixmap
 
 log = get_logger(__name__)
 
 _APP_NAME = "Rad PDF Editor"
 _THUMBNAIL_SIZE = QSize(120, 160)
-
-#: Every concrete BaseToolDialog subclass takes (parent=None), a
-#: different signature than BaseToolDialog.__init__'s own (title,
-#: parent) - so the factory type is this Callable, not type[BaseToolDialog].
-_DialogFactory = Callable[[QWidget | None], BaseToolDialog]
-
-#: tool_id -> dialog class, drives the Tools menu generically instead
-#: of one hand-written branch per tool.
-_TOOL_DIALOGS: dict[str, _DialogFactory] = {
-    "merge": MergeDialog,
-    "extract_pages": ExtractPagesDialog,
-    "reorder_pages": ReorderPagesDialog,
-    "rotate_pages": RotateDialog,
-    "delete_pages": DeletePagesDialog,
-    "compress": CompressDialog,
-    "set_metadata": MetadataDialog,
-    "rename": RenameDialog,
-    "protect": ProtectDialog,
-    "unlock": UnlockDialog,
-    "watermark": WatermarkDialog,
-    "crop": CropDialog,
-    "resize": ResizeDialog,
-    "n_up": NUpDialog,
-    "grayscale": GrayscaleDialog,
-    "header_footer": HeaderFooterDialog,
-    "bates_numbering": BatesNumberingDialog,
-    "flatten": FlattenDialog,
-    "remove_annotations": RemoveAnnotationsDialog,
-    "sign": SignDialog,
-    "create_form_field": CreateFormFieldDialog,
-    # FillFormDialog's __init__ takes (field_names, parent), not just
-    # (parent) - it needs the open document's actual AcroForm field
-    # names before it can lay out its inputs. _run_tool special-cases
-    # tool_id == "fill_form" and never actually calls this factory;
-    # it's here only so the Tools menu loop (which needs *a* callable
-    # matching _DialogFactory for every tool_id) has an entry to iterate.
-    "fill_form": lambda parent: FillFormDialog([], parent),
-    "flip": FlipDialog,
-    "pdf_to_docx": PdfToDocxDialog,
-    "pdf_to_pptx": PdfToPptxDialog,
-    "pdf_to_xlsx": PdfToXlsxDialog,
-    "pdf_to_html": PdfToHtmlDialog,
-    "pdf_to_jpg": PdfToJpgDialog,
-    "docx_to_pdf": DocxToPdfDialog,
-    "pptx_to_pdf": PptxToPdfDialog,
-    "xlsx_to_pdf": XlsxToPdfDialog,
-    "html_to_pdf": HtmlToPdfDialog,
-    "jpg_to_pdf": JpgToPdfDialog,
-    "ocr": OcrDialog,
-    "deskew": DeskewDialog,
-    "repair": RepairDialog,
-}
 
 
 class MainWindow(QMainWindow):
@@ -233,12 +153,29 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.redo_action)
 
         tools_menu = self.menuBar().addMenu(self.tr("&Tools"))
-        for tool_id, dialog_cls in _TOOL_DIALOGS.items():
+        for tool_id, dialog_cls in TOOL_DIALOGS.items():
             plugin = self.controller.get_plugin(tool_id)
             action = QAction(plugin.display_name, self)
             action.triggered.connect(self._make_tool_handler(tool_id, dialog_cls))
             tools_menu.addAction(action)
             self.tool_actions[tool_id] = action
+
+        # Building/running a workflow is document-independent (Build
+        # doesn't touch the currently-open document at all; Run works
+        # against a standalone input/output pair), so these two actions
+        # are hand-wired here rather than going through TOOL_DIALOGS /
+        # the Tools-menu loop above, and are never added to
+        # self.tool_actions (which _update_action_state disables when
+        # no document is open).
+        self.build_workflow_action = QAction(self.tr("&Build Workflow..."), self)
+        self.build_workflow_action.triggered.connect(self._build_workflow)
+
+        self.run_workflow_action = QAction(self.tr("&Run Workflow..."), self)
+        self.run_workflow_action.triggered.connect(self._run_workflow)
+
+        workflows_menu = self.menuBar().addMenu(self.tr("&Workflows"))
+        workflows_menu.addAction(self.build_workflow_action)
+        workflows_menu.addAction(self.run_workflow_action)
 
         toolbar = QToolBar(self.tr("Main"))
         toolbar.setAccessibleName(self.tr("Main toolbar"))
@@ -249,7 +186,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.undo_action)
         toolbar.addAction(self.redo_action)
 
-    def _make_tool_handler(self, tool_id: str, dialog_cls: _DialogFactory) -> Any:
+    def _make_tool_handler(self, tool_id: str, dialog_cls: DialogFactory) -> Any:
         return lambda: self._run_tool(tool_id, dialog_cls)
 
     @contextmanager
@@ -397,7 +334,7 @@ class MainWindow(QMainWindow):
 
     # --- tools ---------------------------------------------------------------
 
-    def _run_tool(self, tool_id: str, dialog_cls: _DialogFactory) -> None:
+    def _run_tool(self, tool_id: str, dialog_cls: DialogFactory) -> None:
         if tool_id != "merge" and not self.controller.is_open:
             self._show_error_message(self.tr("Open a document first."))
             return
@@ -420,6 +357,65 @@ class MainWindow(QMainWindow):
             self._show_error(exc)
             return
         self._refresh()
+
+    # --- workflows -------------------------------------------------------------
+
+    def _build_workflow(self) -> None:
+        """Document-independent by design: a workflow is a saved,
+        named sequence of Operations, not a live edit against
+        self.controller's currently-open document (that's what
+        _run_tool is for)."""
+        dialog = WorkflowBuilderDialog(self.controller.registry, self)
+        if dialog.exec() != BaseToolDialog.DialogCode.Accepted:
+            return
+        pipeline = dialog.build_pipeline()
+        try:
+            WorkflowStore().save(pipeline)
+        except PDFEditorError as exc:
+            self._show_error(exc)
+            return
+        self.statusBar().showMessage(
+            self.tr("Saved workflow '{0}'").format(pipeline.name), 5000
+        )
+
+    def _run_workflow(self) -> None:
+        """A standalone batch run against an input/output file pair -
+        deliberately not touching self.controller or the currently-open
+        document at all, the same "external file(s) in" shape Merge and
+        the Phase 3 conversion ops already use, run through a throwaway
+        SessionTempDir rather than the app's live editing session."""
+        names = WorkflowStore().list_workflows()
+        if not names:
+            QMessageBox.information(
+                self,
+                self.tr("Run Workflow"),
+                self.tr("No saved workflows yet. Use Build Workflow... first."),
+            )
+            return
+
+        dialog = RunWorkflowDialog(names, self)
+        if dialog.exec() != BaseToolDialog.DialogCode.Accepted:
+            return
+
+        try:
+            values = dialog.values()
+            with self._busy_cursor():
+                pipeline = WorkflowStore().load(values["workflow_name"], self.controller.registry)
+                with SessionTempDir() as session:
+                    input_path: Path = values["input_path"]
+                    working = session.path / f"working{input_path.suffix or '.pdf'}"
+                    shutil.copyfile(input_path, working)
+                    doc = DocumentSession(working_path=working, source_path=input_path)
+                    result = pipeline.run(doc)
+                    if result.working_path is None:
+                        raise OperationError("Workflow produced no output document.")
+                    shutil.copyfile(result.working_path, values["output_path"])
+        except PDFEditorError as exc:
+            self._show_error(exc)
+            return
+        self.statusBar().showMessage(
+            self.tr("Workflow run complete: {0}").format(values["output_path"]), 5000
+        )
 
     # --- rendering ------------------------------------------------------------
 

@@ -1,6 +1,9 @@
 """Integration test: discover_and_load registers every first-party
-Phase 1 + Phase 2 plugin, and each one can actually build+run an
-Operation."""
+plugin (Phases 1-4) *and* the real third-party plugin.json plugin
+shipped at plugins/example_plugin (Phase 5) against the actual repo
+/plugins directory - not a synthetic fixture, see
+tests/unit/test_plugin_discovery.py for that - and each one can
+actually build+run an Operation."""
 
 from __future__ import annotations
 
@@ -49,6 +52,7 @@ EXPECTED_TOOL_IDS = {
     "ocr",
     "deskew",
     "repair",
+    "reverse_pages",  # the real third-party example plugin, plugins/example_plugin
 }
 
 

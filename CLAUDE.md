@@ -617,3 +617,237 @@ portability to machines without those binaries (`deskew` needs no
 system binary, so its tests always run), and a real end-to-end
 `MainWindow` round trip confirming GUI wiring, not just unit-level
 Operation tests.
+
+## Phase 5 — Workflow builder + save/replay (done; plugin manifest docs and installers still open)
+
+Per `docs/SPEC.md` section 4, Phase 5 is three things: Workflow
+builder UI + save/replay, plugin manifest docs, installers. Only the
+first is done - the other two are separate, deferred follow-ups, not
+started.
+
+**The actual gap "save/replay" needed closed**: `core/model/pipeline.py`'s
+`Pipeline` (frozen since Phase 0) already had `run()` and
+`serialize()`, but no way back from JSON into live `Operation`s.
+Closing it needed zero per-operation code, because of a convention
+that's held across all 36 operations built in Phases 1-4, verified by
+grep across every `core/ops/*.py` file rather than assumed: every
+`Operation.serialize()`'s `"type"` field exactly matches its
+`ToolPlugin.tool_id` (the only exception, `restore_snapshot`, is the
+internal undo-only helper in `core/ops/common.py` that's explicitly
+documented as never persisted). So reconstruction in
+`core/session/workflow_store.py`'s `deserialize_pipeline()` is just
+`registry.get(data["type"]).build_operation(**kwargs)` per step.
+Verified against real output, not just "didn't raise": built a real
+3-step pipeline (rotate + flip + watermark, spanning Phase 1/2 ops),
+saved it, reloaded it, applied both the original and the reconstructed
+version to identical fixture PDFs, and diffed the real results
+(rotation flag, watermark text extraction) rather than trusting that
+deserialization merely succeeded.
+
+**Where saved workflows live**: `app_data_dir() / "workflows" /
+f"{name}.json"` - one file per workflow - **not** the repo's top-level
+`/workflows` directory SPEC.md's architecture diagram names. That
+reads as a conceptual placeholder, not an instruction to write
+user-created runtime data into the source tree; SPEC.md section 6.4's
+own policy ("local files under the OS-appropriate app-data directory,
+never the user's working directory") already covers this, and
+`recent_files.py`/`audit_log.py`/`autosave.py` all already follow it -
+`workflow_store.py` is a direct sibling, same pattern, same
+`PDFEDITOR_APP_DATA_DIR` test-isolation override.
+
+**GUI: a real circular-import refactor, done properly rather than
+worked around.** The Workflow builder needs to reuse every tool's
+*existing* dialog (so building a step is configured with the exact
+same UI as running that tool directly, not a second hand-rolled form)
+via the `_TOOL_DIALOGS` dict that used to live inline in
+`gui/main_window.py`. Importing it from a new `gui/dialogs/` module
+back into `main_window.py` (which already imports every dialog module)
+would be circular. Fixed by moving the dict itself - renamed public
+`TOOL_DIALOGS`, no leading underscore, since it's now genuinely shared
+- into a new `gui/dialogs/tool_dialog_registry.py`, with
+`main_window.py` importing it from there instead. Pure move + rename;
+the dict's contents and every dialog class are unchanged.
+
+`WorkflowBuilderDialog` (`gui/dialogs/workflow_builder_dialog.py`) has
+a non-standard constructor (`(registry, parent=None)`, needs the live
+`Registry` to enumerate tools and build real `Operation`s), same kind
+of deviation `FillFormDialog` already has from the plain `(parent=None)`
+every ordinary tool dialog uses. Reuses `merge_dialog.py`'s exact
+list-plus-Add/Remove/Move-Up/Move-Down shape for the step list.
+"Add Step..." explicitly **excludes `fill_form`** from the tool picker
+- it needs a live document's actual AcroForm field names, which a
+workflow being built in the abstract (against no particular document)
+can't supply, same reason `MainWindow._run_tool` already special-cases
+it. Picking a tool opens that tool's real dialog from `TOOL_DIALOGS`,
+and on accept immediately calls `registry.get(tool_id).build_operation(**values)`
+- validates via the Operation's own `__post_init__` right away, not
+deferred to run time, and gives a real `Operation` to display via
+`describe()` (every operation in this codebase already produces a
+sensible pre-apply description - confirmed during Phase 3/4 work,
+where the dual-engine ops explicitly say `"...(pending)"` for exactly
+this not-yet-applied case). `accept()` is overridden to reject an
+empty name or zero steps via `QMessageBox.warning`, dialog stays open
+rather than silently producing a broken/empty saved workflow.
+`build_pipeline()` is the dialog's actual exit point, not `values()` -
+a genuinely different shape than every other tool dialog, and that's
+fine; `BaseToolDialog.values()` is a convention other dialogs follow,
+not an enforced contract.
+
+`RunWorkflowDialog` (`gui/dialogs/run_workflow_dialog.py`) picks a
+saved workflow name + input/output PDF pair. `MainWindow._run_workflow`
+runs it through a **throwaway `SessionTempDir`/`DocumentSession`,
+never touching `self.controller`** - deliberately not woven into the
+currently-open document's live undo stack. This was a real design
+decision, not an oversight: SPEC.md's own framing is "replayed against
+new input files unattended," and integrating per-step into the live
+undo/redo stack would flood it with N entries per run and conflate two
+different mental models (live interactive editing vs. batch replay of
+an external saved sequence). Verified by test: running a workflow
+against an external file while a *different* document is open in the
+GUI leaves that open document's `operation_log` completely unchanged
+(`test_run_workflow_applies_saved_pipeline_without_touching_open_document`,
+`tests/integration/test_gui_smoke.py`).
+
+**CLI**: `list-workflows` and `run-workflow <name> <input> -o <output>`
+in `cli/main.py` aren't `ToolPlugin`s (they replay a saved *sequence*,
+not apply one op), so they're intercepted in `main()` before the
+`registry.get(args.tool_id)` plugin lookup, rather than fitting into
+`_build_kwargs`'s per-tool_id branches like everything else.
+
+**A real split-brain risk avoided during this phase, worth remembering
+for next time multiple agents touch shared files concurrently**: the
+GUI dialog work and this backend were built in parallel by two
+different processes in the same working tree, and separately, a third
+task was committing+pushing *unrelated* already-finished Phase 2/3/4
+work from that same tree at the same time. The commit task was given
+an explicit, itemized list of exactly which files/hunks belonged to
+the already-finished work vs. the in-flight Phase 5 work, told to
+re-check `git diff --stat` immediately before `git add`, and told to
+stop and report rather than guess if it couldn't tell the two apart in
+a shared file - it did have to navigate exactly that situation (`cli/main.py`,
+`gui/main_window.py` were being edited by the Phase 5 work while it
+ran) and got it right. Also hit: an agent launched with `isolation:
+"worktree"` for a git task that needed to operate on this session's
+own uncommitted working-tree changes fails structurally - a fresh
+worktree is a clean branch off `origin/main`, none of the uncommitted
+work is there. Worktree isolation is for tasks that need a disposable
+sandbox copy, not for committing what's already sitting in the shared
+checkout.
+
+Verification matched every prior phase: real multi-step pipeline
+save/load round-trip diffed against direct application (not just
+"didn't raise"), `pytest.mark.skipif`-free (no external binary
+involved), full CLI (`list-workflows`/`run-workflow` against a real
+fixture) and GUI (`WorkflowBuilderDialog`'s add-step/exclude-fill_form/
+move-up/validation paths, `RunWorkflowDialog`'s real end-to-end run)
+smoke tests, 340/340 full suite passing.
+
+## Phase 5, remainder — plugin manifest + installers (done, Phase 5 fully complete)
+
+`docs/SPEC.md` section 5's manifest-format open item is resolved:
+**`plugin.json` directory scan, not Python `entry_points`** -
+`entry_points` needs a plugin to be a properly pip-installed package
+just to register one tool, real friction against SPEC.md section 1's
+"small team, local installs" distribution model that a folder dropped
+into `/plugins` doesn't have. `core/registry/plugin_base.py`'s
+`PLUGIN_MANIFEST_SCHEMA_VERSION = 1` had been sitting unused since
+Phase 0, anticipating exactly this.
+
+**`core/registry/registry.py`'s `_third_party_plugins()`**: scans
+`plugins_dir/*/plugin.json`, dynamically imports each declared module
+via `importlib.util.spec_from_file_location` (no `sys.path`
+pollution, no requiring plugins to be real installed packages),
+instantiates the declared class, hands it to the same `registry.register()`
+every first-party plugin already uses. A malformed manifest or a
+plugin that fails to load/instantiate/register is skipped with a
+logged warning - never a crash. `discover_and_load()` gained an
+optional `plugins_dir` parameter (defaults to the repo's `/plugins`,
+mainly for tests) - purely additive, doesn't touch the frozen
+`Operation`/`DocumentSession`/`Pipeline`/`ToolPlugin` interfaces.
+
+**A real bug found and fixed, not a hypothetical**: the first working
+version of `_load_plugin_class` used `importlib.util.module_from_spec`
++ `exec_module` without registering the module in `sys.modules`
+first. Every dataclass-based `Operation` (i.e. every operation in this
+codebase, first- and third-party) hit `AttributeError: 'NoneType'
+object has no attribute '__dict__'` on load - Python's `dataclasses`
+machinery looks itself up via `sys.modules[cls.__module__]` while
+processing field annotations (this project's `from __future__ import
+annotations` style guarantees every `Operation` hits that code path),
+so a dynamically-loaded module that was never registered in
+`sys.modules` breaks it. Fixed by adding `sys.modules[module_name] =
+module` before `exec_module()` - the standard, documented pattern for
+this exact situation. Also used a synthetic, collision-resistant
+module name (`pdfeditor_plugin_{plugin_dir_name}_{module_stem}`, not
+just the file stem) - two different plugins each naming their own
+module `operation.py` (as this project's own example plugin does)
+would otherwise silently clobber each other in the process-global
+`sys.modules` dict.
+
+**`plugins/example_plugin/`** ("Reverse Page Order") is a complete,
+real, working plugin - not just illustrative markdown - exercising the
+full contract end to end, reusing `core/ops/common.py`'s helpers
+exactly like a first-party op (those are usable by external code, not
+`core/ops`-private). Verified registered from the *actual* repo
+`/plugins` directory (not a synthetic fixture) via
+`test_the_real_shipped_example_plugin_loads_from_the_default_dir`
+(`tests/integration/test_discover_and_load.py`), and its `Operation`
+verified against real page reordering, not just "didn't raise."
+
+**A second real gap found while making the example plugin actually
+usable end-to-end, not just registrable**: `WorkflowBuilderDialog`'s
+"Add Step..." picker (`gui/dialogs/workflow_builder_dialog.py`)
+enumerates every registered plugin including third-party ones, but
+unconditionally did `TOOL_DIALOGS[tool_id](self)` - a real `KeyError`
+crash for any plugin with no matching dialog registered, which
+`reverse_pages` (a parameterless tool with no dialog of its own) hit
+immediately when actually exercised through the real picker flow, not
+just imagined. Fixed: a tool_id absent from `TOOL_DIALOGS` is now
+treated as "takes no configuration" and built directly with
+`build_operation()` and no dialog shown - correct for `reverse_pages`,
+and a reasonable default for any future third-party plugin that
+doesn't ship its own dialog.
+
+**Known, documented scope boundary** (`plugins/README.md`): a
+third-party plugin is *not* automatically exposed as its own CLI
+subcommand or Tools-menu entry - that's true of every tool, first-
+party included, each needs its own hand-written `argparse` subparser
+in `cli/main.py` and `TOOL_DIALOGS` entry, there's no generic dispatch
+mechanism (yet). What *does* work transparently for any registered
+plugin, third-party included: programmatic use
+(`registry.get(tool_id).build_operation(**kwargs)`), and Workflows -
+both the GUI builder (via the fallback above) and the CLI's
+`run-workflow`, since `Pipeline.run()` doesn't care what's inside a
+step.
+
+**Packaging** (`packaging/`): PyInstaller, one `.spec` used on every
+OS. Two real, hand-verified findings while building on Linux (not
+assumed to work from reading PyInstaller's docs):
+- **`SPECPATH`, not the invocation directory.** Paths inside a `.spec`
+  file resolve relative to the spec file's own location, not wherever
+  `pyinstaller` was actually run from - a plain `"gui/main.py"` failed
+  with `script '.../packaging/gui/main.py' not found` even when
+  correctly invoked from the repo root. Fixed with PyInstaller's
+  `SPECPATH` builtin + `pathex=[_REPO_ROOT]` (needed separately, for
+  `gui/main.py`'s own `from core... import ...` absolute imports to
+  resolve).
+- **Single-file output, not a one-folder bundle** - the spec's
+  `EXE(...)` call is given `a.binaries`/`a.datas` directly rather than
+  routed through a separate `COLLECT(...)` step, which is what
+  produces PyInstaller's one-folder mode instead. Confirmed by the
+  actual build output (`dist/rad-pdf-editor`, a single ELF binary, not
+  a directory) - `packaging/build.sh`'s echoed instructions and
+  `packaging/README.md` were written to match what the build actually
+  produced, not the other way around.
+- `collect_all(...)` per package (`pikepdf`, `fitz`, `ocrmypdf`,
+  `reportlab`, `pdfplumber`, `deskew`, `skimage`, `pyhanko`) rather
+  than hand-picking `hiddenimports` - PyInstaller's static analysis
+  doesn't reliably follow everything a compiled-extension package
+  loads dynamically.
+- The built binary was actually launched (`QT_QPA_PLATFORM=offscreen`,
+  stayed running 5+s with an empty log) to confirm the full app - every
+  `core`/`gui` import, not just a minimal smoke script - genuinely
+  initializes, not just that PyInstaller's own build step exited 0.
+  Windows/macOS use the identical spec but are explicitly documented
+  in `packaging/README.md` as **not yet verified** on real hardware -
+  not claimed as tested when they weren't.

@@ -123,6 +123,66 @@ def test_malformed_pages_argument_fails_cleanly_not_a_traceback(
     assert "Error:" in capsys.readouterr().err
 
 
+def test_list_workflows_reports_none_when_empty(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["list-workflows"]) == 0
+    assert "No saved workflows" in capsys.readouterr().out
+
+
+def test_run_workflow_end_to_end(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from core.model.pipeline import Pipeline
+    from core.registry.registry import Registry, discover_and_load
+    from core.session.workflow_store import WorkflowStore
+
+    registry = Registry()
+    discover_and_load(registry)
+    rotate = registry.get("rotate_pages").build_operation(angle=90, pages=[])
+    watermark = registry.get("watermark").build_operation(text="DRAFT", opacity=0.3, font_size=40)
+    WorkflowStore().save(Pipeline(name="cli_wf", operations=[rotate, watermark]))
+
+    assert main(["list-workflows"]) == 0
+    assert "cli_wf" in capsys.readouterr().out
+
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    out = tmp_path / "out.pdf"
+    exit_code = main(["run-workflow", "cli_wf", str(src), "-o", str(out)])
+    assert exit_code == 0
+
+    with pikepdf.Pdf.open(out) as pdf:
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 90
+    with fitz.open(out) as pdf:
+        assert "DRAFT" in pdf[0].get_text()
+
+
+def test_run_workflow_records_every_step_in_the_audit_log(tmp_path: Path) -> None:
+    from core.model.pipeline import Pipeline
+    from core.registry.registry import Registry, discover_and_load
+    from core.session.audit_log import AuditLog
+    from core.session.workflow_store import WorkflowStore
+
+    registry = Registry()
+    discover_and_load(registry)
+    rotate = registry.get("rotate_pages").build_operation(angle=90, pages=[])
+    watermark = registry.get("watermark").build_operation(text="DRAFT", opacity=0.3, font_size=40)
+    WorkflowStore().save(Pipeline(name="cli_wf", operations=[rotate, watermark]))
+
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    out = tmp_path / "out.pdf"
+    assert main(["run-workflow", "cli_wf", str(src), "-o", str(out)]) == 0
+
+    entries = AuditLog().read_all()
+    assert [e["operation"]["type"] for e in entries] == ["rotate_pages", "watermark"]
+
+
+def test_run_workflow_missing_name_fails_cleanly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    out = tmp_path / "out.pdf"
+    exit_code = main(["run-workflow", "does_not_exist", str(src), "-o", str(out)])
+    assert exit_code == 1
+    assert "Error:" in capsys.readouterr().err
+
+
 def test_create_form_field_adds_a_text_field(tmp_path: Path) -> None:
     src = _make_pdf(tmp_path / "in.pdf", 1)
     out = tmp_path / "out.pdf"

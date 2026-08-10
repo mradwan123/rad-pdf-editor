@@ -65,9 +65,46 @@ all, with Ghostscript's output always re-verified by reopening via
 pikepdf before being trusted (confirmed by hand that `gs` can exit 0
 while only partially recovering a file).
 
-All 36 operations are registered via `discover_and_load`, covered by
-unit + integration tests, and exposed as both CLI subcommands
-(`python -m cli.main`) and GUI Tools-menu dialogs.
+**Phase 5 — Workflow builder + save/replay, plugin manifest docs,
+installers: done.** A saved Workflow is just a named `Pipeline`
+(`core/model/pipeline.py`, frozen since Phase 0) serialized to JSON.
+Loading one back into live `Operation`s
+(`core/session/workflow_store.py`'s `deserialize_pipeline`) turned out
+to need no per-operation code at all, because of a convention verified
+by hand across all 36 built-in operations: every
+`Operation.serialize()`'s `"type"` field exactly matches its
+`ToolPlugin.tool_id`, so reconstruction is just
+`registry.get(type).build_operation(**kwargs)`. Saved workflows live
+under `app_data_dir()/workflows/` (one JSON file each) - user data,
+not the source tree, same convention as recent files/audit log/
+autosave. The GUI's Workflows menu ("Build Workflow...", "Run
+Workflow...") and the CLI's `list-workflows`/`run-workflow`
+subcommands are two independent surfaces over the same store. Building
+a workflow reuses every tool's *existing* dialog unchanged (picking a
+step just opens that tool's real dialog); running one is a deliberate
+batch/unattended operation against an external input/output file pair,
+not woven into the currently-open document's live undo stack.
+
+Third-party plugins are real now, not just planned: `plugins/` is
+scanned at startup for `plugin.json` manifests
+(`core/registry/registry.py`) - a simple directory-scan format chosen
+over Python `entry_points` to match this project's small-team/local-
+install distribution model (no pip-publish step needed to add one
+tool). `plugins/example_plugin/` is a complete, real, working example
+("Reverse Page Order") demonstrating the full contract, not just
+illustrative markdown - see `plugins/README.md` for the schema and a
+walkthrough. A malformed manifest or a plugin that fails to load is
+skipped with a logged warning, never a startup crash.
+
+Standalone builds via PyInstaller (`packaging/`) - real build, real
+launch, verified on Linux (`packaging/build.sh`); Windows
+(`packaging/build.ps1`) uses the identical spec but is not yet
+verified on real hardware, see `packaging/README.md`.
+
+All 37 operations (36 built-in + the shipped example plugin) are
+registered via `discover_and_load`, covered by unit + integration
+tests, and exposed as both CLI subcommands (`python -m cli.main`) and
+GUI Tools-menu dialogs.
 
 Session/security infrastructure is in place: a private per-session
 temp directory (`core/session/session_dir.py`), secure multi-pass
@@ -83,7 +120,7 @@ PDF Editor**: PySide6 + Qt Fusion style, a dark silver/gray/black theme
 a programmatically-drawn app icon/logo (`gui/resources.py`, no binary
 image assets checked in), a branded empty-state welcome screen, a
 thumbnail page grid (rendered via `QtPdf`), Open/Save As/Close,
-Undo/Redo, and a Tools menu with a dialog for each of the 36
+Undo/Redo, and a Tools menu with a dialog for each of the 36 built-in
 operations, all subclassing a shared `BaseToolDialog` (SPEC.md 6.2).
 `gui/controller.py` holds the Qt-free session/document glue so it's
 unit-testable without a display server; `tests/integration/test_gui_smoke.py`
@@ -94,7 +131,7 @@ Pages can be reordered by dragging thumbnails directly in the grid
 (applies a real `ReorderPagesOperation`, undoable like everything
 else), in addition to the typed-permutation dialog under Tools.
 
-Not yet built: a pipeline/Workflow builder UI (Phase 5).
+All five phases from `docs/SPEC.md`'s roadmap are now complete.
 
 ## Setup
 
@@ -135,3 +172,7 @@ pytest                # tests (set QT_QPA_PLATFORM=offscreen if headless)
   architecture, agent/workstream breakdown, and roadmap.
 - [`CLAUDE.md`](CLAUDE.md) — quick-reference conventions for Claude
   Code sessions working in this repo.
+- [`plugins/README.md`](plugins/README.md) — third-party plugin
+  manifest format and a walkthrough building one.
+- [`packaging/README.md`](packaging/README.md) — building a standalone
+  installer, and its per-OS verification status.
