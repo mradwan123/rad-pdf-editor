@@ -1003,6 +1003,110 @@ def test_run_workflow_applies_saved_pipeline_without_touching_open_document(
     window.close()
 
 
+def test_view_menu_zoom_in_out_and_reset_resize_the_icon_and_rerender(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from gui.main_window import _THUMBNAIL_SIZE
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    window.controller.open_document(src)
+    window._refresh()
+
+    assert window.thumbnail_size == _THUMBNAIL_SIZE
+    assert window.thumbnail_list.iconSize() == _THUMBNAIL_SIZE
+
+    window.zoom_in_action.trigger()
+
+    assert window.thumbnail_size.width() > _THUMBNAIL_SIZE.width()
+    assert window.thumbnail_list.iconSize() == window.thumbnail_size
+    # Not just an internal size variable - the actual rendered icon
+    # pixmap must be re-rendered at the new size, not stretched.
+    item = window.thumbnail_list.item(0)
+    assert item.icon().actualSize(window.thumbnail_size) == window.thumbnail_size
+
+    window.zoom_out_action.trigger()
+    window.zoom_out_action.trigger()
+
+    assert window.thumbnail_size.width() < _THUMBNAIL_SIZE.width()
+    assert window.thumbnail_list.iconSize() == window.thumbnail_size
+    item = window.thumbnail_list.item(0)
+    assert item.icon().actualSize(window.thumbnail_size) == window.thumbnail_size
+
+    window.reset_zoom_action.trigger()
+
+    assert window.thumbnail_size == _THUMBNAIL_SIZE
+    assert window.thumbnail_list.iconSize() == _THUMBNAIL_SIZE
+
+    window.controller.close_session()
+    window.close()
+
+
+def test_view_menu_zoom_is_clamped_to_min_and_max(qapp: QApplication) -> None:
+    from gui.main_window import _THUMBNAIL_ZOOM_MAX_WIDTH, _THUMBNAIL_ZOOM_MIN_WIDTH
+
+    window = MainWindow()
+
+    for _ in range(50):
+        window.zoom_in_action.trigger()
+    assert window.thumbnail_size.width() == _THUMBNAIL_ZOOM_MAX_WIDTH
+
+    for _ in range(50):
+        window.zoom_out_action.trigger()
+    assert window.thumbnail_size.width() == _THUMBNAIL_ZOOM_MIN_WIDTH
+
+    window.close()
+
+
+def test_view_menu_toggle_toolbar_visibility(qapp: QApplication) -> None:
+    window = MainWindow()
+    window.show()
+    assert window.toolbar.isVisible()
+    assert window.toggle_toolbar_action.isChecked()
+
+    window.toggle_toolbar_action.trigger()
+    assert not window.toolbar.isVisible()
+    assert not window.toggle_toolbar_action.isChecked()
+
+    window.toggle_toolbar_action.trigger()
+    assert window.toolbar.isVisible()
+    window.close()
+
+
+def test_view_menu_toggle_status_bar_visibility(qapp: QApplication) -> None:
+    window = MainWindow()
+    window.show()
+    assert window.statusBar().isVisible()
+    assert window.toggle_statusbar_action.isChecked()
+
+    window.toggle_statusbar_action.trigger()
+    assert not window.statusBar().isVisible()
+    assert not window.toggle_statusbar_action.isChecked()
+
+    window.toggle_statusbar_action.trigger()
+    assert window.statusBar().isVisible()
+    window.close()
+
+
+def test_view_menu_full_screen_toggle_reflects_window_state(qapp: QApplication) -> None:
+    # Under QT_QPA_PLATFORM=offscreen, showFullScreen()/showNormal()
+    # were confirmed by hand to actually flip Qt.WindowState.WindowFullScreen
+    # (not a headless no-op) - this test exercises the real toggle, not
+    # a stand-in for one.
+    window = MainWindow()
+    window.show()
+    assert not window.isFullScreen()
+
+    window.full_screen_action.trigger()
+    assert window.isFullScreen()
+    assert window.full_screen_action.isChecked()
+
+    window.full_screen_action.trigger()
+    assert not window.isFullScreen()
+    assert not window.full_screen_action.isChecked()
+    window.close()
+
+
 def test_run_workflow_records_every_step_in_the_audit_log(
     qapp: QApplication, tmp_path: Path
 ) -> None:

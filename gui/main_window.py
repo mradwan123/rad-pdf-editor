@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QCloseEvent, QIcon, QImage, QPainter, QPixmap
+from PySide6.QtGui import QAction, QCloseEvent, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
     QApplication,
@@ -48,6 +48,13 @@ log = get_logger(__name__)
 
 _APP_NAME = "Rad PDF Editor"
 _THUMBNAIL_SIZE = QSize(120, 160)
+# View > Thumbnail zoom: width-driven (height is derived from
+# _THUMBNAIL_SIZE's own aspect ratio, recomputed from the *original*
+# width/height each time rather than compounded step-over-step, so
+# repeated zooming can't drift the aspect ratio away from the source).
+_THUMBNAIL_ZOOM_MIN_WIDTH = 60
+_THUMBNAIL_ZOOM_MAX_WIDTH = 240
+_THUMBNAIL_ZOOM_STEP = 20
 
 
 class MainWindow(QMainWindow):
@@ -59,10 +66,15 @@ class MainWindow(QMainWindow):
         self.controller = AppController()
         self.recent_files = RecentFiles()
 
+        # Mutable, unlike _THUMBNAIL_SIZE (the fixed default the View >
+        # Reset Zoom action returns to) - View > Zoom In/Out reassigns
+        # this and re-renders thumbnails at the new size.
+        self.thumbnail_size = QSize(_THUMBNAIL_SIZE)
+
         self.thumbnail_list = QListWidget()
         self.thumbnail_list.setAccessibleName(self.tr("Page thumbnails"))
         self.thumbnail_list.setViewMode(QListWidget.ViewMode.IconMode)
-        self.thumbnail_list.setIconSize(_THUMBNAIL_SIZE)
+        self.thumbnail_list.setIconSize(self.thumbnail_size)
         self.thumbnail_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.thumbnail_list.setMovement(QListWidget.Movement.Static)
         self.thumbnail_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
@@ -236,14 +248,91 @@ class MainWindow(QMainWindow):
         workflows_menu.addAction(self.build_workflow_action)
         workflows_menu.addAction(self.run_workflow_action)
 
-        toolbar = QToolBar(self.tr("Main"))
-        toolbar.setAccessibleName(self.tr("Main toolbar"))
-        self.addToolBar(toolbar)
-        toolbar.addAction(self.open_action)
-        toolbar.addAction(self.save_as_action)
-        toolbar.addSeparator()
-        toolbar.addAction(self.undo_action)
-        toolbar.addAction(self.redo_action)
+        self.toolbar = QToolBar(self.tr("Main"))
+        self.toolbar.setAccessibleName(self.tr("Main toolbar"))
+        self.addToolBar(self.toolbar)
+        self.toolbar.addAction(self.open_action)
+        self.toolbar.addAction(self.save_as_action)
+        self.toolbar.addSeparator()
+        self.toolbar.addAction(self.undo_action)
+        self.toolbar.addAction(self.redo_action)
+
+        self._build_view_menu()
+
+    def _build_view_menu(self) -> None:
+        self.zoom_in_action = QAction(self.tr("Zoom &In"), self)
+        self.zoom_in_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
+        self.zoom_in_action.triggered.connect(self._zoom_in)
+
+        self.zoom_out_action = QAction(self.tr("Zoom &Out"), self)
+        self.zoom_out_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
+        self.zoom_out_action.triggered.connect(self._zoom_out)
+
+        self.reset_zoom_action = QAction(self.tr("&Reset Zoom"), self)
+        self.reset_zoom_action.setShortcut("Ctrl+0")
+        self.reset_zoom_action.triggered.connect(self._reset_zoom)
+
+        self.toggle_toolbar_action = QAction(self.tr("Show &Toolbar"), self)
+        self.toggle_toolbar_action.setCheckable(True)
+        self.toggle_toolbar_action.setChecked(True)
+        self.toggle_toolbar_action.toggled.connect(self._toggle_toolbar)
+
+        self.toggle_statusbar_action = QAction(self.tr("Show Status &Bar"), self)
+        self.toggle_statusbar_action.setCheckable(True)
+        self.toggle_statusbar_action.setChecked(True)
+        self.toggle_statusbar_action.toggled.connect(self._toggle_statusbar)
+
+        self.full_screen_action = QAction(self.tr("&Full Screen"), self)
+        self.full_screen_action.setShortcut("F11")
+        self.full_screen_action.setCheckable(True)
+        self.full_screen_action.toggled.connect(self._toggle_full_screen)
+
+        view_menu = self.menuBar().addMenu(self.tr("&View"))
+        view_menu.addAction(self.zoom_in_action)
+        view_menu.addAction(self.zoom_out_action)
+        view_menu.addAction(self.reset_zoom_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.toggle_toolbar_action)
+        view_menu.addAction(self.toggle_statusbar_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.full_screen_action)
+
+    # --- view menu: thumbnail zoom / toolbar / status bar / full screen --
+
+    def _set_thumbnail_zoom(self, width: int) -> None:
+        width = max(_THUMBNAIL_ZOOM_MIN_WIDTH, min(_THUMBNAIL_ZOOM_MAX_WIDTH, width))
+        # Derived from the *original* _THUMBNAIL_SIZE ratio each call,
+        # not from self.thumbnail_size's current value - repeated
+        # zoom-in/zoom-out calls can't compound rounding error and
+        # drift the aspect ratio away from the source.
+        height = round(width * _THUMBNAIL_SIZE.height() / _THUMBNAIL_SIZE.width())
+        self.thumbnail_size = QSize(width, height)
+        self.thumbnail_list.setIconSize(self.thumbnail_size)
+        # Existing thumbnail pixmaps were rendered at the old size -
+        # re-render from the PDF at the new size rather than letting
+        # Qt stretch/shrink the old QIcon blurrily.
+        self._refresh()
+
+    def _zoom_in(self) -> None:
+        self._set_thumbnail_zoom(self.thumbnail_size.width() + _THUMBNAIL_ZOOM_STEP)
+
+    def _zoom_out(self) -> None:
+        self._set_thumbnail_zoom(self.thumbnail_size.width() - _THUMBNAIL_ZOOM_STEP)
+
+    def _reset_zoom(self) -> None:
+        self._set_thumbnail_zoom(_THUMBNAIL_SIZE.width())
+
+    def _toggle_toolbar(self, checked: bool) -> None:
+        self.toolbar.setVisible(checked)
+
+    def _toggle_statusbar(self, checked: bool) -> None:
+        self.statusBar().setVisible(checked)
+
+    def _toggle_full_screen(self, checked: bool) -> None:
+        if checked:
+            self.showFullScreen()
+        else:
+            self.showNormal()
 
     def _make_tool_handler(self, tool_id: str, dialog_cls: DialogFactory) -> Any:
         return lambda: self._run_tool(tool_id, dialog_cls)
@@ -520,13 +609,13 @@ class MainWindow(QMainWindow):
             log.error("Could not load PDF for thumbnail rendering: %s", path)
             return
         for i in range(pdf_doc.pageCount()):
-            rendered = pdf_doc.render(i, _THUMBNAIL_SIZE)
+            rendered = pdf_doc.render(i, self.thumbnail_size)
             # QtPdf leaves any unpainted area of the page fully
             # transparent (alpha=0) rather than opaque white - most
             # visible on blank/near-empty pages. Composite onto a
             # white backdrop so a thumbnail always reads as a page,
             # not as "nothing" wherever the source PDF painted nothing.
-            page_image = QImage(_THUMBNAIL_SIZE, QImage.Format.Format_ARGB32_Premultiplied)
+            page_image = QImage(self.thumbnail_size, QImage.Format.Format_ARGB32_Premultiplied)
             page_image.fill(Qt.GlobalColor.white)
             painter = QPainter(page_image)
             painter.drawImage(0, 0, rendered)

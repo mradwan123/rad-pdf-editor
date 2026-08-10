@@ -904,3 +904,71 @@ to `TOOL_DIALOGS` keys, not the full registry.
 Full suite: **357 passed**, `ruff check .` clean, `mypy core cli gui`
 clean - supersedes the "340/340" figure earlier in this doc, which
 predates the plugin-manifest/installer and review-pass work.
+
+## View menu (done)
+
+A new `&View` menu in `MainWindow` (`gui/main_window.py`), alongside
+File/Edit/Tools/Workflows - four items, scoped exactly to what was
+asked for (no undo/redo involvement, no `Operation`, pure window/view
+state):
+
+1. **Thumbnail zoom** - Zoom In/Zoom Out/Reset Zoom, width-driven
+   (`_THUMBNAIL_ZOOM_MIN_WIDTH = 60`, `_THUMBNAIL_ZOOM_MAX_WIDTH = 240`,
+   `_THUMBNAIL_ZOOM_STEP = 20`, default `_THUMBNAIL_SIZE = QSize(120,
+   160)`), standard `QKeySequence.StandardKey.ZoomIn`/`ZoomOut`
+   shortcuts, `Ctrl+0` for reset. `MainWindow.thumbnail_size` (new
+   instance attribute, replacing the old direct use of the module-level
+   `_THUMBNAIL_SIZE` constant in both `setIconSize` and
+   `_render_thumbnails`) holds the current zoom level; height is always
+   derived from *`_THUMBNAIL_SIZE`'s original* aspect ratio
+   (`round(width * _THUMBNAIL_SIZE.height() / _THUMBNAIL_SIZE.width())`)
+   rather than compounded from the current size step-over-step, so
+   repeated zoom in/out can't drift the aspect ratio. `_set_thumbnail_zoom`
+   clamps to the min/max, updates `thumbnail_list.setIconSize(...)`,
+   and calls `_refresh()` - genuinely re-rendering every thumbnail from
+   the PDF at the new size via the existing `_render_thumbnails`, not
+   stretching the old pixmaps blurrily (confirmed by test: the actual
+   `QIcon.actualSize()` of a rendered thumbnail after zooming matches
+   the new `thumbnail_size` exactly).
+2. **Toggle Toolbar** - checkable action wired to `self.toolbar.setVisible()`.
+   The toolbar previously lived only as a local variable inside
+   `_build_actions` (never a `self` attribute, so nothing outside that
+   method could reach it) - promoted to `self.toolbar` as part of this
+   change, a small but real precondition for the toggle to have
+   anything to call.
+3. **Toggle Status Bar** - checkable action wired to
+   `self.statusBar().setVisible()`.
+4. **Full Screen** - checkable action wired to
+   `showFullScreen()`/`showNormal()`.
+
+**Full-screen behavior under `QT_QPA_PLATFORM=offscreen` was checked
+by hand before writing the test, not assumed** - the task explicitly
+flagged this as a possible headless limitation worth investigating
+rather than papering over. It is **not** a no-op: a real `MainWindow`
+instantiated under the offscreen platform, shown, and toggled via
+`full_screen_action.trigger()` genuinely flips
+`windowState() == Qt.WindowState.WindowFullScreen` and
+`isFullScreen()` both ways (confirmed interactively before the test
+was written). So `test_view_menu_full_screen_toggle_reflects_window_state`
+asserts the real state transition, not a relaxed/skipped check.
+
+All four items are plain `QAction`s built in a new
+`MainWindow._build_view_menu()` (called from the end of
+`_build_actions()`) - no `BaseToolDialog` subclass, since none of this
+touches an `Operation`, `DocumentSession`, or the undo/redo stack; the
+task was explicit that this is pure UI/window state, and CLAUDE.md's
+own "everything is an `Operation`" rule is scoped to *tools*, not
+view-state toggles like this.
+
+Five new tests in `tests/integration/test_gui_smoke.py`, driving the
+real `MainWindow` headlessly (matching the existing convention): zoom
+in/out/reset actually resize `thumbnail_list.iconSize()` and
+re-render a real thumbnail to the new pixel dimensions; zoom is
+clamped at both ends after 50 repeated zoom-in/zoom-out triggers;
+toolbar and status-bar visibility actually flip
+(`isVisible()`/`isChecked()` both checked, not just the internal
+`Qt.WA_WState_Hidden`-style flag); full-screen toggling actually
+flips `isFullScreen()` both directions.
+
+Full suite: **362 passed** (357 baseline + 5 new), `ruff check .`
+clean, `mypy core cli gui` clean.
