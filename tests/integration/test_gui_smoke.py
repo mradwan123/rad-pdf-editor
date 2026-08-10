@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -29,7 +30,13 @@ from gui.dialogs.merge_dialog import MergeDialog
 from gui.dialogs.rotate_dialog import RotateDialog
 from gui.dialogs.run_workflow_dialog import RunWorkflowDialog
 from gui.dialogs.sign_dialog import SignDialog
+from gui.dialogs.tab_placement_dialog import (
+    PLACEMENT_NEW_TAB,
+    PLACEMENT_REPLACE_CURRENT,
+    TabPlacementDialog,
+)
 from gui.dialogs.workflow_builder_dialog import WorkflowBuilderDialog
+from gui.document_tab import DocumentTab
 from gui.main_window import MainWindow
 
 
@@ -53,6 +60,45 @@ def _make_pdf(path: Path, num_pages: int) -> Path:
     return path
 
 
+def _open_tab(window: MainWindow, path: Path) -> DocumentTab:
+    """Open `path` in a new tab through the window's own open flow.
+    The New Tab / Replace Current Tab placement choice is passed
+    explicitly rather than mocked, so no modal dialog is involved."""
+    window._open_document_path(path, PLACEMENT_NEW_TAB)
+    tab = window.current_tab
+    assert tab is not None
+    return tab
+
+
+def _fake_placement(placement: str) -> Any:
+    """Stand-in for TabPlacementDialog.exec that clicks the dialog's
+    real button for `placement`, so the dialog's own handler decides
+    what `placement` ends up as rather than the test setting it
+    directly. TabPlacementDialog is a plain Python QDialog subclass
+    precisely so patching its `exec` works at all (a QMessageBox's
+    compiled `exec` silently isn't intercepted - see CLAUDE.md)."""
+
+    def fake_exec(self: TabPlacementDialog) -> QDialog.DialogCode:
+        self.button_for(placement).click()
+        return QDialog.DialogCode(self.result())
+
+    return fake_exec
+
+
+def _force_close(window: MainWindow) -> None:
+    """Close the window with no unsaved-changes prompt.
+
+    A bare window.close() on a dirty document triggers a real, modal
+    QMessageBox.warning() that nothing can click headlessly - it hangs
+    pytest forever (CLAUDE.md documents this the hard way). Wiping
+    every tab's session first is equivalent to choosing Discard on
+    each, and leaves closeEvent nothing to ask about.
+    """
+    for tab in window.tabs():
+        tab.controller.close_session()
+    window.close()
+
+
 def test_starts_on_empty_state_with_branded_title(qapp: QApplication) -> None:
     window = MainWindow()
     assert window.windowTitle() == "Rad PDF Editor"
@@ -64,22 +110,22 @@ def test_opening_a_document_switches_to_thumbnail_view(qapp: QApplication, tmp_p
     src = _make_pdf(tmp_path / "src.pdf", 2)
     window = MainWindow()
 
-    window.controller.open_document(src)
-    window._refresh()
+    tab = _open_tab(window, src)
 
-    assert window.stack.currentWidget() is window.thumbnail_list
-    window.close()
+    assert window.stack.currentWidget() is window.tab_widget
+    assert window.thumbnail_list is tab.thumbnail_list
+    assert window.tab_widget.count() == 1
+    _force_close(window)
 
 
 def test_closing_document_returns_to_empty_state(qapp: QApplication, tmp_path: Path) -> None:
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    _open_tab(window, src)
 
-    window.controller.close_session()
-    window._refresh()
+    window._close_document()
 
+    assert window.tab_widget.count() == 0
     assert window.stack.currentWidget() is window.empty_state
     assert window.windowTitle() == "Rad PDF Editor"
     window.close()
@@ -91,11 +137,10 @@ def test_open_render_undo_redo_save_close(qapp: QApplication, tmp_path: Path) ->
     src = _make_pdf(tmp_path / "src.pdf", 3)
     window = MainWindow()
 
-    assert window.thumbnail_list.count() == 0
+    assert window.thumbnail_list is None
     assert not window.undo_action.isEnabled()
 
-    window.controller.open_document(src)
-    window._refresh()
+    _open_tab(window, src)
     assert window.thumbnail_list.count() == 3
     assert "src.pdf" in window.windowTitle()
 
@@ -115,8 +160,7 @@ def test_open_render_undo_redo_save_close(qapp: QApplication, tmp_path: Path) ->
     assert window.redo_action.isEnabled()
 
     working_dir = window.controller.doc.working_path.parent
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
     assert not working_dir.exists()
 
 
@@ -127,8 +171,7 @@ def test_dragging_a_thumbnail_reorders_the_document(qapp: QApplication, tmp_path
     # real signal-handling code path, not a hand-rolled substitute.
     src = _make_pdf(tmp_path / "src.pdf", 4)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    _open_tab(window, src)
 
     moved = window.thumbnail_list.model().moveRow(QModelIndex(), 3, QModelIndex(), 0)
     assert moved
@@ -141,8 +184,7 @@ def test_dragging_a_thumbnail_reorders_the_document(qapp: QApplication, tmp_path
     assert window.undo_action.isEnabled()
     with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
         assert len(pdf.pages) == 4
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_tool_actions_disabled_without_open_document_except_merge(qapp: QApplication) -> None:
@@ -168,15 +210,13 @@ def test_merge_from_tools_menu_opens_a_document(qapp: QApplication, tmp_path: Pa
     assert window.controller.is_open
     assert window.thumbnail_list.count() == 3
     assert window.tool_actions["rotate_pages"].isEnabled()
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_run_tool_applies_operation_via_dialog_values(qapp: QApplication, tmp_path: Path) -> None:
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    _open_tab(window, src)
 
     def fake_exec(self: RotateDialog) -> QDialog.DialogCode:
         self.angle.setCurrentText("180")
@@ -187,15 +227,13 @@ def test_run_tool_applies_operation_via_dialog_values(qapp: QApplication, tmp_pa
 
     with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
         assert int(pdf.pages[0].get("/Rotate", 0)) == 180
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_cancelling_a_tool_dialog_leaves_document_unchanged(qapp: QApplication, tmp_path: Path) -> None:
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    _open_tab(window, src)
     ops_before = len(window.controller.doc.operation_log)
 
     def fake_cancel(self: RotateDialog) -> QDialog.DialogCode:
@@ -242,8 +280,7 @@ def test_crop_then_bates_numbering_via_tools_menu(qapp: QApplication, tmp_path: 
 
     src = _make_pdf(tmp_path / "src.pdf", 2)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    _open_tab(window, src)
 
     def fake_crop(self: CropDialog) -> QDialog.DialogCode:
         self.margin_top.setValue(20)
@@ -269,8 +306,7 @@ def test_crop_then_bates_numbering_via_tools_menu(qapp: QApplication, tmp_path: 
 
     assert len(window.controller.doc.operation_log) == 2
     assert window.undo_action.isEnabled()
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def _make_pdf_with_text_field(path: Path) -> Path:
@@ -326,8 +362,7 @@ def test_fill_form_via_tools_menu_uses_detected_field_names(
 
     src = _make_pdf_with_text_field(tmp_path / "form.pdf")
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    _open_tab(window, src)
 
     def fake_fill(self: FillFormDialog) -> QDialog.DialogCode:
         assert "name" in self._inputs
@@ -339,8 +374,7 @@ def test_fill_form_via_tools_menu_uses_detected_field_names(
 
     with fitz.open(window.controller.doc.working_path) as pdf:
         assert "Jane Smith" in pdf[0].get_text()
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_sign_via_tools_menu_places_image(qapp: QApplication, tmp_path: Path) -> None:
@@ -353,8 +387,7 @@ def test_sign_via_tools_menu_places_image(qapp: QApplication, tmp_path: Path) ->
     img.save(sig)
 
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    _open_tab(window, src)
 
     def fake_sign(self: SignDialog) -> QDialog.DialogCode:
         self._image_path = sig
@@ -371,8 +404,7 @@ def test_sign_via_tools_menu_places_image(qapp: QApplication, tmp_path: Path) ->
     with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
         assert len(pdf.pages) == 1
     assert window.undo_action.isEnabled()
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_create_form_field_via_tools_menu_adds_a_text_field(
@@ -382,8 +414,7 @@ def test_create_form_field_via_tools_menu_adds_a_text_field(
 
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    _open_tab(window, src)
 
     def fake_create(self: CreateFormFieldDialog) -> QDialog.DialogCode:
         self.field_name.setText("full_name")
@@ -405,8 +436,7 @@ def test_create_form_field_via_tools_menu_adds_a_text_field(
     assert widgets[0].field_name == "full_name"
     assert widgets[0].field_value == "Jane Doe"
     assert window.undo_action.isEnabled()
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_refresh_does_not_leak_qpdfdocument_instances(qapp: QApplication, tmp_path: Path) -> None:
@@ -420,8 +450,7 @@ def test_refresh_does_not_leak_qpdfdocument_instances(qapp: QApplication, tmp_pa
 
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    _open_tab(window, src)
 
     before = len([c for c in window.children() if isinstance(c, QPdfDocument)])
     for _ in range(5):
@@ -430,8 +459,7 @@ def test_refresh_does_not_leak_qpdfdocument_instances(qapp: QApplication, tmp_pa
     after = len([c for c in window.children() if isinstance(c, QPdfDocument)])
 
     assert after == before
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_reordering_to_the_same_order_does_not_record_a_no_op_operation(
@@ -442,13 +470,12 @@ def test_reordering_to_the_same_order_does_not_record_a_no_op_operation(
     # still pushed a no-op ReorderPagesOperation onto the undo stack.
     src = _make_pdf(tmp_path / "src.pdf", 3)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    tab = _open_tab(window, src)
     ops_before = len(window.controller.doc.operation_log)
 
-    for i in range(window.thumbnail_list.count()):
-        window.thumbnail_list.item(i).setData(Qt.ItemDataRole.UserRole, i + 1)
-    window._apply_thumbnail_reorder()
+    for i in range(tab.thumbnail_list.count()):
+        tab.thumbnail_list.item(i).setData(Qt.ItemDataRole.UserRole, i + 1)
+    window._apply_thumbnail_reorder(tab)
 
     assert len(window.controller.doc.operation_log) == ops_before
     window.close()
@@ -457,14 +484,14 @@ def test_reordering_to_the_same_order_does_not_record_a_no_op_operation(
 def test_closing_a_clean_document_does_not_prompt(qapp: QApplication, tmp_path: Path) -> None:
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    _open_tab(window, src)
 
     with patch.object(QMessageBox, "warning") as mock_warning:
         window._close_document()
 
     mock_warning.assert_not_called()
-    assert not window.controller.is_open
+    assert window.tab_widget.count() == 0
+    assert window.controller is None
     window.close()
 
 
@@ -475,21 +502,21 @@ def test_closing_a_dirty_document_prompts_and_cancel_keeps_it_open(
 
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
-    window.controller.open_document(src)
+    _open_tab(window, src)
     window.controller.apply_operation(RotatePagesOperation(angle=90))
     window._refresh()
 
     with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Cancel):
         window._close_document()
 
+    assert window.tab_widget.count() == 1
     assert window.controller.is_open
     # window.close() alone would hang here: the document is still
     # (correctly) dirty, so it'd trigger a second, unmocked closeEvent
     # -> a real modal QMessageBox.warning() blocking forever
     # headlessly. Clear the session directly first, then close() is
     # safe (nothing left to prompt about).
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_closing_a_dirty_document_discard_closes_it(qapp: QApplication, tmp_path: Path) -> None:
@@ -497,14 +524,14 @@ def test_closing_a_dirty_document_discard_closes_it(qapp: QApplication, tmp_path
 
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
-    window.controller.open_document(src)
+    _open_tab(window, src)
     window.controller.apply_operation(RotatePagesOperation(angle=90))
     window._refresh()
 
     with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Discard):
         window._close_document()
 
-    assert not window.controller.is_open
+    assert window.tab_widget.count() == 0
     window.close()
 
 
@@ -515,7 +542,7 @@ def test_window_close_event_is_ignored_when_user_cancels_unsaved_prompt(
 
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
-    window.controller.open_document(src)
+    _open_tab(window, src)
     window.controller.apply_operation(RotatePagesOperation(angle=90))
     window._refresh()
 
@@ -527,8 +554,7 @@ def test_window_close_event_is_ignored_when_user_cancels_unsaved_prompt(
     assert window.controller.is_open
     # See the comment in test_closing_a_dirty_document_prompts_and_cancel_keeps_it_open
     # - window.close() alone here would hang on a real, unmocked prompt.
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 # --- recent files -----------------------------------------------------------
@@ -541,8 +567,7 @@ def test_opening_a_document_adds_it_to_recent_files(qapp: QApplication, tmp_path
     window._open_document_path(src)
 
     assert window.recent_files.list() == [src]
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_recent_files_menu_lists_most_recent_first_and_reopens_on_click(
@@ -551,19 +576,22 @@ def test_recent_files_menu_lists_most_recent_first_and_reopens_on_click(
     a = _make_pdf(tmp_path / "a.pdf", 1)
     b = _make_pdf(tmp_path / "b.pdf", 2)
     window = MainWindow()
-    window._open_document_path(a)
-    window._open_document_path(b)
+    _open_tab(window, a)
+    _open_tab(window, b)
 
     window._populate_recent_files_menu()
     actions = window.recent_files_menu.actions()
     # newest first, then a separator, then "Clear Recent Files"
     assert [a.text() for a in actions[:2]] == ["b.pdf", "a.pdf"]
 
-    actions[1].trigger()  # reopen a.pdf
+    # Reopening through the menu goes through the same New Tab /
+    # Replace Current Tab prompt File > Open does.
+    with patch.object(TabPlacementDialog, "exec", _fake_placement(PLACEMENT_NEW_TAB)):
+        actions[1].trigger()  # reopen a.pdf
 
     assert window.controller.doc.source_path == a
-    window.controller.close_session()
-    window.close()
+    assert window.tab_widget.count() == 3
+    _force_close(window)
 
 
 def test_recent_files_menu_shows_placeholder_when_empty(qapp: QApplication) -> None:
@@ -601,8 +629,7 @@ def test_clear_recent_files_empties_the_list(qapp: QApplication, tmp_path: Path)
     window.recent_files.clear()
 
     assert window.recent_files.list() == []
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_opening_a_recent_file_over_a_dirty_document_prompts_first(
@@ -613,16 +640,21 @@ def test_opening_a_recent_file_over_a_dirty_document_prompts_first(
     a = _make_pdf(tmp_path / "a.pdf", 1)
     b = _make_pdf(tmp_path / "b.pdf", 1)
     window = MainWindow()
-    window._open_document_path(a)
+    _open_tab(window, a)
     window.controller.apply_operation(RotatePagesOperation(angle=90))
     window.recent_files.add(b)
 
-    with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Cancel):
+    # Replace Current Tab still has to clear the dirty check for the
+    # tab it's about to overwrite - cancelling that leaves it alone.
+    with (
+        patch.object(TabPlacementDialog, "exec", _fake_placement(PLACEMENT_REPLACE_CURRENT)),
+        patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Cancel),
+    ):
         window._open_recent_file(b)
 
     assert window.controller.doc.source_path == a
-    window.controller.close_session()
-    window.close()
+    assert window.tab_widget.count() == 1
+    _force_close(window)
 
 
 # --- thumbnail context menu --------------------------------------------------
@@ -644,17 +676,15 @@ def test_thumbnail_context_menu_rotate_right_rotates_selected_pages_only(
 ) -> None:
     src = _make_pdf(tmp_path / "src.pdf", 3)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    tab = _open_tab(window, src)
 
-    window._apply_thumbnail_rotate([2], angle=90)
+    window._apply_thumbnail_rotate(tab, [2], angle=90)
 
     with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
         assert int(pdf.pages[0].get("/Rotate", 0)) == 0
         assert int(pdf.pages[1].get("/Rotate", 0)) == 90
         assert int(pdf.pages[2].get("/Rotate", 0)) == 0
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_thumbnail_context_menu_rotate_left_uses_negative_angle(
@@ -662,15 +692,13 @@ def test_thumbnail_context_menu_rotate_left_uses_negative_angle(
 ) -> None:
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    tab = _open_tab(window, src)
 
-    window._apply_thumbnail_rotate([1], angle=-90)
+    window._apply_thumbnail_rotate(tab, [1], angle=-90)
 
     with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
         assert int(pdf.pages[0].get("/Rotate", 0)) == 270
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_thumbnail_context_menu_delete_removes_selected_pages(
@@ -678,15 +706,13 @@ def test_thumbnail_context_menu_delete_removes_selected_pages(
 ) -> None:
     src = _make_pdf(tmp_path / "src.pdf", 3)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    tab = _open_tab(window, src)
 
-    window._apply_thumbnail_delete([1, 3])
+    window._apply_thumbnail_delete(tab, [1, 3])
 
     with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
         assert len(pdf.pages) == 1
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_thumbnail_context_menu_does_nothing_without_a_selection(
@@ -694,16 +720,14 @@ def test_thumbnail_context_menu_does_nothing_without_a_selection(
 ) -> None:
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
-    assert window.thumbnail_list.selectedItems() == []
+    tab = _open_tab(window, src)
+    assert tab.thumbnail_list.selectedItems() == []
 
     with patch.object(QMenu, "exec") as mock_exec:
-        window._show_thumbnail_context_menu(QPoint(0, 0))
+        window._show_thumbnail_context_menu(tab, QPoint(0, 0))
 
     mock_exec.assert_not_called()
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 # --- busy-cursor feedback ----------------------------------------------------
@@ -736,8 +760,7 @@ def test_running_a_tool_leaves_no_override_cursor_set_afterward(
 ) -> None:
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    _open_tab(window, src)
 
     def fake_exec(self: RotateDialog) -> QDialog.DialogCode:
         self.angle.setCurrentText("180")
@@ -747,8 +770,7 @@ def test_running_a_tool_leaves_no_override_cursor_set_afterward(
         window._run_tool("rotate_pages", RotateDialog)
 
     assert QApplication.overrideCursor() is None
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 # --- Phase 5: Workflow builder + run --------------------------------------
@@ -982,8 +1004,7 @@ def test_run_workflow_applies_saved_pipeline_without_touching_open_document(
     # a currently-open, unrelated document - Run Workflow's batch
     # semantics must leave it completely untouched.
     other_open = _make_pdf(tmp_path / "other.pdf", 1)
-    window.controller.open_document(other_open)
-    window._refresh()
+    _open_tab(window, other_open)
     ops_before = len(window.controller.doc.operation_log)
 
     def fake_exec(self: RunWorkflowDialog) -> QDialog.DialogCode:
@@ -999,8 +1020,7 @@ def test_run_workflow_applies_saved_pipeline_without_touching_open_document(
     with pikepdf.Pdf.open(out) as pdf:
         assert int(pdf.pages[0].get("/Rotate", 0)) == 90
     assert len(window.controller.doc.operation_log) == ops_before
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_view_menu_zoom_in_out_and_reset_resize_the_icon_and_rerender(
@@ -1010,8 +1030,7 @@ def test_view_menu_zoom_in_out_and_reset_resize_the_icon_and_rerender(
 
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
-    window.controller.open_document(src)
-    window._refresh()
+    _open_tab(window, src)
 
     assert window.thumbnail_size == _THUMBNAIL_SIZE
     assert window.thumbnail_list.iconSize() == _THUMBNAIL_SIZE
@@ -1038,8 +1057,7 @@ def test_view_menu_zoom_in_out_and_reset_resize_the_icon_and_rerender(
     assert window.thumbnail_size == _THUMBNAIL_SIZE
     assert window.thumbnail_list.iconSize() == _THUMBNAIL_SIZE
 
-    window.controller.close_session()
-    window.close()
+    _force_close(window)
 
 
 def test_view_menu_zoom_is_clamped_to_min_and_max(qapp: QApplication) -> None:
