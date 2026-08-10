@@ -696,17 +696,21 @@ not an enforced contract.
 `RunWorkflowDialog` (`gui/dialogs/run_workflow_dialog.py`) picks a
 saved workflow name + input/output PDF pair. `MainWindow._run_workflow`
 runs it through a **throwaway `SessionTempDir`/`DocumentSession`,
-never touching `self.controller`** - deliberately not woven into the
-currently-open document's live undo stack. This was a real design
-decision, not an oversight: SPEC.md's own framing is "replayed against
-new input files unattended," and integrating per-step into the live
-undo/redo stack would flood it with N entries per run and conflate two
-different mental models (live interactive editing vs. batch replay of
-an external saved sequence). Verified by test: running a workflow
-against an external file while a *different* document is open in the
-GUI leaves that open document's `operation_log` completely unchanged
+never touching `self.controller`'s document or undo stack** -
+deliberately not woven into the currently-open document's live undo
+stack. This was a real design decision, not an oversight: SPEC.md's
+own framing is "replayed against new input files unattended," and
+integrating per-step into the live undo/redo stack would flood it with
+N entries per run and conflate two different mental models (live
+interactive editing vs. batch replay of an external saved sequence).
+Verified by test: running a workflow against an external file while a
+*different* document is open in the GUI leaves that open document's
+`operation_log` completely unchanged
 (`test_run_workflow_applies_saved_pipeline_without_touching_open_document`,
-`tests/integration/test_gui_smoke.py`).
+`tests/integration/test_gui_smoke.py`). (A later review pass did add
+one `self.controller` touch here - see "Phase 5 review pass" below;
+the document/undo-stack isolation this paragraph describes still
+holds.)
 
 **CLI**: `list-workflows` and `run-workflow <name> <input> -o <output>`
 in `cli/main.py` aren't `ToolPlugin`s (they replay a saved *sequence*,
@@ -851,3 +855,52 @@ assumed to work from reading PyInstaller's docs):
   Windows/macOS use the identical spec but are explicitly documented
   in `packaging/README.md` as **not yet verified** on real hardware -
   not claimed as tested when they weren't.
+
+## Phase 5 review pass (done)
+
+A follow-up review of the merged Phase 5 work (workflow builder,
+plugin manifests, packaging) found and fixed two real bugs, not just
+theoretical gaps:
+
+- **`MainWindow._run_workflow` never recorded to the audit log.**
+  Every other path that applies an `Operation` - tool dialogs via
+  `AppController.apply_operation`, and the CLI's own `run-workflow`
+  (which already had its own audit-log test) - records to the audit
+  trail. The GUI's workflow-run path didn't, so a workflow run through
+  the GUI silently modified a document with zero audit trail. Fixed by
+  recording each step via `self.controller.audit_log` after a
+  successful run - the one exception to "never touching
+  `self.controller`" noted above; it still never touches
+  `self.controller.doc` or the undo stack.
+- **Pre-existing, unrelated `mypy` failure** in
+  `core/ops/convert_from.py`'s `PdfToXlsxOperation` -
+  `openpyxl.Workbook.active` has no type stubs, so mypy inferred the
+  generic `_WorkbookChild` base (no `.append()`). Fixed by replacing a
+  bare `assert default_sheet is not None` with
+  `assert isinstance(default_sheet, Worksheet)` - a real runtime
+  guarantee that also fixes the type narrowing.
+
+Four tests were added covering the audit-log fix and gaps found while
+reviewing `WorkflowBuilderDialog`/`workflow_store.py` test coverage
+(`_remove_selected`, `_add_step`'s error-dialog path on an invalid
+operation, and `deserialize_pipeline` raising a proper `PDFEditorError`
+- not a raw `KeyError` - for an unknown plugin type).
+
+**Tools menu grouped into submenus.** The Tools menu had grown into
+one flat list of every registered tool_id across Phases 1-5 - too long
+to scan. Split into eight submenus (Organize Pages, Edit and Design,
+Forms and Signatures, Security, Document Properties, Convert from PDF,
+Convert to PDF, Scans and Repair); every `TOOL_DIALOGS` tool_id must
+appear in exactly one group, checked at menu-build time so a
+newly-added tool can't silently go missing from the menu. Verified
+live, not just read through: instantiated the real `MainWindow` under
+`QT_QPA_PLATFORM=offscreen`, walked the actual `QMenu`/`QAction` tree,
+and confirmed all tool_ids land in exactly one submenu. Third-party
+plugin tool_ids (e.g. the example plugin's `reverse_pages`) correctly
+stay out of the Tools menu entirely, unchanged from the scope boundary
+already documented above - the "exactly one group" invariant is scoped
+to `TOOL_DIALOGS` keys, not the full registry.
+
+Full suite: **357 passed**, `ruff check .` clean, `mypy core cli gui`
+clean - supersedes the "340/340" figure earlier in this doc, which
+predates the plugin-manifest/installer and review-pass work.

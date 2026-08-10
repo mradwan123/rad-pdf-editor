@@ -439,10 +439,11 @@ class MainWindow(QMainWindow):
 
     def _run_workflow(self) -> None:
         """A standalone batch run against an input/output file pair -
-        deliberately not touching self.controller or the currently-open
-        document at all, the same "external file(s) in" shape Merge and
-        the Phase 3 conversion ops already use, run through a throwaway
-        SessionTempDir rather than the app's live editing session."""
+        deliberately not touching self.controller's document or undo
+        stack (only its audit_log, to record the steps), the same
+        "external file(s) in" shape Merge and the Phase 3 conversion
+        ops already use, run through a throwaway SessionTempDir rather
+        than the app's live editing session."""
         names = WorkflowStore().list_workflows()
         if not names:
             QMessageBox.information(
