@@ -131,6 +131,17 @@ Pages can be reordered by dragging thumbnails directly in the grid
 (applies a real `ReorderPagesOperation`, undoable like everything
 else), in addition to the typed-permutation dialog under Tools.
 
+Several documents can be open at once, in tabs. Each tab is a fully
+independent editing session — its own private working copy, undo/redo
+stack and unsaved-changes state (a `•` on the tab label) — so an
+operation in one document can never reach another. Tabs are closable
+and drag-reorderable, with `Ctrl+W` to close and `Ctrl+Tab` /
+`Ctrl+Shift+Tab` to cycle; closing a tab securely wipes that
+document's working files immediately rather than waiting for app exit.
+Opening a document asks whether to open it in a new tab or replace the
+current one. If the app ever dies unexpectedly, the next launch offers
+to restore the tab you were last working in.
+
 All five phases from `docs/SPEC.md`'s roadmap are now complete.
 
 ## Setup

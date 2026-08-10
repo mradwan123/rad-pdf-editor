@@ -972,3 +972,241 @@ flips `isFullScreen()` both directions.
 
 Full suite: **362 passed** (357 baseline + 5 new), `ruff check .`
 clean, `mypy core cli gui` clean.
+
+## Multi-document tabs (done)
+
+The largest structural change in the project so far, and deliberately
+confined to `gui/` plus one additive `core/session/autosave.py`
+extension - no frozen interface (`Operation`, `DocumentSession`,
+`Pipeline`, `ToolPlugin`) was touched at all.
+
+**The architecture: one `AppController` per tab.** `AppController`
+(`gui/controller.py`) already owned exactly the right unit of state -
+one `SessionTempDir`, one `DocumentSession`, one undo/redo stack, one
+dirty flag, one `AutosaveJournal` - it was just documented as "one
+instance per running GUI process." Making it per-*document* instead
+required no restructuring of what it owns; the only real change is
+that the two genuinely app-wide things it used to build privately are
+now passed in and shared across all tabs:
+
+- the plugin `Registry` (rebuilding it per tab would rescan `/plugins`
+  and re-import every plugin module for nothing), and
+- the `AuditLog` (one append-only trail for the whole app; each entry
+  already carries its own `document_label`, so a shared trail stays
+  unambiguous with several documents open - verified by
+  `test_both_controllers_record_into_one_shared_audit_log`).
+
+Both parameters default to a freshly built private instance, so a bare
+`AppController()` - as `tests/unit/test_gui_controller.py` constructs -
+behaves exactly as it did before. `RecentFiles` stays on `MainWindow`,
+app-wide, unchanged.
+
+`gui/document_tab.py`'s `DocumentTab` is the per-tab widget: an
+`AppController` plus that document's own thumbnail `QListWidget`
+(there's one grid per document now, not one per window).
+`MainWindow.controller` / `.thumbnail_list` / `.current_tab` became
+read-only properties returning the *active* tab's objects, **or None
+when no tab is open** - that None case is real and every caller
+handles it, since zero tabs is the empty-state welcome screen.
+`MainWindow.tabs()` returns the tabs in current visual order (which
+the user can change by dragging).
+
+**`SessionTempDir` needed no change at all** to get the right wipe
+granularity - it was already per-instance and idempotent-on-close, so
+"close one tab, securely wipe that tab's working files now, leave
+every other tab's alone" is just `tab.controller.close_session()` on
+the tab being removed. Verified as a real filesystem check, not by
+inspection (`test_closing_a_tab_wipes_only_that_tabs_session`: tab A's
+session dir is gone, tab B's still exists, *and* tab B then applies a
+further operation successfully afterwards - the wipe didn't take
+anything the survivor needed).
+
+**Locked product decisions, as implemented:**
+
+1. **Opening always asks New Tab / Replace Current Tab / Cancel**
+   (`gui/dialogs/tab_placement_dialog.py`), skipped entirely when zero
+   tabs are open (nothing to replace, nothing ambiguous). Replace
+   still runs the *target tab's* own dirty check first. `File > Open`
+   and `File > Open Recent` both route through
+   `MainWindow._open_document_path(path, placement)`.
+2. **Full tab-bar scope**: closable tabs, `setMovable(True)`
+   drag-to-reorder, a tab-bar context menu (Close / Close Others /
+   Close All, each closed tab through its own dirty check), a leading
+   `•` on the label of a tab with unsaved changes, `Ctrl+W`, and
+   `Ctrl+Tab`/`Ctrl+Shift+Tab` wired explicitly (`QTabWidget` has no
+   built-in cycling) - the two cycle actions live in the File menu so
+   their shortcuts are actually registered with the window rather than
+   just declared on a floating `QAction`.
+3. **Crash recovery restores the most recently active tab only** - see
+   the autosave section below.
+4. **`Run Workflow` is untouched**: still a throwaway
+   `SessionTempDir`/`DocumentSession`, still opens no tab and touches
+   no tab's `AppController`, document or undo stack. It now reads the
+   app-level `self.registry`/`self.audit_log` instead of
+   `self.controller.registry`/`.audit_log`, which incidentally fixes a
+   latent crash - with tabs, `self.controller` is None when nothing is
+   open, and Run Workflow is explicitly usable with nothing open.
+5. **View-menu zoom/toolbar/status bar/full screen stay window-level.**
+   Zoom re-icon-sizes *every* tab's grid and a tab re-renders when
+   activated, so a background tab can never show thumbnails left over
+   from a different zoom level (`test_a_new_tab_uses_the_current_window_level_zoom`
+   checks the real `QIcon.actualSize()` on both tabs, not just the
+   internal size variable).
+
+**`closeEvent` checks every tab, sequentially.** Each tab is made the
+visible one before it's asked about (otherwise the prompt names a
+document the user can't see), and Cancel on any single tab aborts the
+whole window close, leaving the tabs not yet reached untouched.
+`_confirm_discard_if_dirty(tab)` and `_save_as(tab=None)` both take
+the specific tab, because during a multi-tab close the tab being asked
+about is frequently not the one that was active when the close started.
+
+**Drag-and-drop-to-open was checked for and is genuinely absent** from
+`main_window.py` (no `dragEnterEvent`/`dropEvent` anywhere) - so it
+stayed out of scope rather than being invented as part of this change.
+
+### Autosave scoping
+
+`core/session/autosave.py` gained a module-level "most recently active
+session" pointer (`mark_active_session` / `active_session_id` /
+`recover_active_session` / `discard_active_session`) - purely
+additive, `AutosaveJournal` itself is unchanged. Every tab keeps
+checkpointing its own journal exactly as before; the pointer just
+records which one crash recovery should offer. `MainWindow` re-marks
+it on every tab change, open and applied operation.
+
+Two alternatives were considered and rejected: (a) only letting the
+active tab checkpoint at all (switching tabs would then destroy the
+other tab's recovery data, which is worse than not offering it), and
+(b) purging every other session's journal at startup (that would wipe
+a *concurrently running* second app instance's live journals - there's
+no single-instance lock).
+
+`AutosaveRecovery` also carries `source_path` now, read with `.get()`
+so journals written before the field existed still parse - no schema
+bump needed, per the additive-changes policy. Without it a restored
+document would have taken its identity from the checkpoint file's own
+name rather than the file the user was actually editing.
+
+`MainWindow.restore_autosaved_session()` is called from `gui/main.py`
+*after* `window.show()`, deliberately not from `MainWindow.__init__` -
+a constructor that can block on a modal prompt is both bad practice
+and would make every `MainWindow()` in the test suite hang.
+`AppController.restore_from_checkpoint()` opens the checkpoint as a
+normal private working copy but keeps the crashed document's identity
+and starts **dirty** (the recovered state was, by definition, never
+saved). The undo history is not restored - the journal stores
+serialized operations, not re-appliable ones, which
+`core/session/autosave.py`'s module docstring has documented since
+Phase 0.
+
+Known, pre-existing limitation left as-is (not a regression, but worth
+recording): a crashed run's *session temp dirs* still linger on disk -
+nothing has ever cleaned those up, only the journals. And with two app
+instances running, the pointer is app-data-dir-global, so the later
+instance's active tab wins.
+
+### Real bugs and surprises found while building this
+
+- **`QAction.triggered` carries a `checked` bool, and PySide6 will
+  bind it to an optional first parameter.** Real, not theoretical:
+  `_save_as(tab=None)` and `_close_other_tabs(index=None)` connected
+  as bare bound methods would have received `False` as `tab`/`index` -
+  `_save_as` would then have done `False.controller` and crashed the
+  GUI on Ctrl+S. Caught while wiring the actions (the single-document
+  `_save_as()` took no parameters, so this hazard simply didn't exist
+  before). Fixed by connecting through `lambda: self._save_as()`.
+  Worth remembering for any future action whose slot grows an optional
+  parameter - it's a silent, type-checker-invisible break.
+- **`QMessageBox` can't be used for the New Tab / Replace Current Tab
+  prompt.** Qt 6 dropped `setButtonText`, so custom-labelled choices
+  need a hand-built box - and a hand-built `QMessageBox` instance's
+  `.exec()` is the exact compiled-method trap CLAUDE.md already
+  documents for `QMenu.exec`: `patch.object(QMessageBox, "exec", fake)`
+  does not intercept it, the real modal dialog runs, and a headless
+  test hangs forever. Hence `TabPlacementDialog`, a plain Python
+  `QDialog` subclass, which patches exactly like every
+  `BaseToolDialog` in the project already does. (The static
+  `QMessageBox.warning`/`.question`/`.critical` helpers stay
+  patchable - it's only instance `.exec()` that isn't.)
+- **A failed open in a new tab used to strand an empty tab.** Found by
+  asking what `_open_document_path`'s error branch does now that it
+  may have created a tab before the open was attempted; the new tab
+  survived the error with no document in it. Fixed by discarding the
+  just-created tab on failure (a *replaced* tab correctly keeps its
+  existing document, since `open_document` already leaves the current
+  one intact when it fails - the Phase-1 regression fix documented
+  above). Covered by
+  `test_a_failed_open_in_a_new_tab_does_not_strand_an_empty_tab`.
+- **Merge-with-no-document had to move.** `_run_tool` creates the tab
+  only *after* the dialog is accepted, so a cancelled Merge can't
+  leave an empty tab behind either.
+- **Theming the tab bar has one landmine**: adding *any*
+  `QTabBar::close-button` rule to `gui/styles.qss` replaces that
+  button's icon wholesale, so a rule without a valid `image:` silently
+  removes the close button from every tab. `styles.qss` therefore
+  styles `QTabWidget::pane` and `QTabBar::tab` only, and says so in a
+  comment. Verified the same way the branding pass was (SPEC.md 6.2
+  discipline): rendered the real three-tab window - one tab dirty - to
+  PNG via `widget.grab()` under `QT_QPA_PLATFORM=offscreen` and looked
+  at it, confirming the selected tab, the `•` marker and the close
+  buttons all read correctly, since a green test run proves none of
+  that.
+- **Confirmation that the old test-hang warning is still live.** The
+  first full run after the refactor, before the tests were adapted,
+  hung exactly as CLAUDE.md's "UX polish batch" section warns: a
+  `window.close()` with a dirty document reaching a real, unmocked
+  modal `QMessageBox.warning`. Rather than fixing it case by case, the
+  smoke tests now share a `_force_close(window)` helper that wipes
+  every tab's session first (equivalent to Discard on each), so
+  `closeEvent` has nothing left to ask about.
+
+### How per-tab isolation was actually verified
+
+Not "the UI looked right" - every isolation claim is checked against
+real files and real state:
+
+- `test_two_tabs_have_genuinely_independent_undo_stacks`: applies an
+  operation in tab A and undoes it there, then asserts tab B's
+  `operation_log`, `redo_stack`, dirty flag **and the actual bytes of
+  its own working PDF** (page count + `/Rotate`) are all untouched -
+  plus that the two tabs' working paths live in different session
+  dirs, and that the Undo/Redo actions follow whichever tab is active.
+- `test_closing_a_tab_wipes_only_that_tabs_session`: filesystem check
+  on both session dirs, then a further real operation applied to the
+  surviving tab.
+- `test_close_other_tabs_dirty_checks_each_closed_tab`: three tabs,
+  one dirty; asserts the unsaved-changes prompt fired *exactly once*
+  (only for the dirty one) and both closed tabs' session dirs are gone.
+- `test_close_all_tabs_cancelled_on_a_dirty_tab_keeps_it_open` and
+  `test_window_close_checks_every_tab_not_only_the_active_one` (the
+  latter dirties a *background* tab and leaves a clean one active -
+  the single-document `closeEvent` would have seen nothing to lose).
+- `test_tabs_can_be_reordered_and_keep_their_own_documents`: calls the
+  real `tabBar().moveTab(...)` - the same call Qt makes at the end of
+  a genuine drag - for the same reason
+  `test_dragging_a_thumbnail_reorders_the_document` calls
+  `model().moveRow(...)`: real drag gestures aren't reliably
+  simulatable under `QT_QPA_PLATFORM=offscreen`.
+- `test_autosave_restores_only_the_most_recently_active_tab`: two
+  edited tabs are abandoned without ever closing a session (what a
+  crash actually leaves behind), then a fresh `MainWindow` restores
+  **one** tab - the last-*activated* one, deliberately not the
+  last-opened one - and the restored working file really carries the
+  unsaved 90° rotation while the original file on disk still doesn't.
+- `test_run_workflow_touches_no_tab_and_opens_none`: the Phase 5
+  isolation test, extended to the multi-tab world - two open tabs,
+  both `operation_log`s empty and both working PDFs unrotated
+  afterwards, and no third tab opened.
+- Qt-free unit coverage underneath all of it
+  (`tests/unit/test_gui_controller.py`): two `AppController`s are
+  independent sessions, a shared `Registry`/`AuditLog` really is
+  shared (and a bare `AppController()` still builds its own), both
+  controllers' entries land in one audit trail correctly labelled per
+  document, and `restore_from_checkpoint` keeps the crashed
+  document's identity while starting dirty. Plus
+  `tests/unit/test_autosave.py` for the pointer itself, including a
+  corrupt pointer meaning "no recovery," not a crash.
+
+Full suite: **398 passed** (362 baseline + 36 new), `ruff check .`
+clean, `mypy core cli gui` clean.

@@ -143,6 +143,34 @@ QComboBox QAbstractItemView {
     outline: none;
 }
 
+/* Document tabs. Deliberately no QTabBar::close-button rule: styling
+   it in QSS replaces its icon wholesale, and a rule without a valid
+   image simply removes the close button from every tab. */
+QTabWidget::pane {
+    background-color: #17181a;
+    border: 1px solid #2a2b2f;
+    top: -1px;
+}
+
+QTabBar::tab {
+    background-color: #1e1f22;
+    border: 1px solid #2a2b2f;
+    border-bottom: none;
+    color: #a9adb5;
+    padding: 6px 12px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:hover {
+    color: #d6d9df;
+}
+
+QTabBar::tab:selected {
+    background-color: #17181a;
+    border-color: #4a4c53;
+    color: #f2f3f5;
+}
+
 QListWidget {
     background-color: #17181a;
     border: 1px solid #2a2b2f;
