@@ -9,7 +9,7 @@ import fitz
 import pikepdf
 import pytest
 
-from core.errors import OperationError, SchemaVersionError
+from core.errors import OperationError, PluginLoadError, SchemaVersionError
 from core.model.document import DocumentSession
 from core.model.pipeline import Pipeline
 from core.registry.registry import Registry, discover_and_load
@@ -170,6 +170,22 @@ def test_deserialize_rejects_unsupported_operation_schema_version(registry: Regi
 def test_deserialize_rejects_missing_type_field(registry: Registry) -> None:
     data = {"schema_version": 1, "name": "x", "operations": [{"schema_version": 1}]}
     with pytest.raises(SchemaVersionError):
+        deserialize_pipeline(data, registry)
+
+
+def test_deserialize_raises_a_pdfeditor_error_for_an_unknown_plugin(registry: Registry) -> None:
+    # A workflow file can reference a tool_id that no longer exists in
+    # this registry - e.g. a third-party plugin that's since been
+    # uninstalled, or a hand-edited file. registry.get() raises
+    # PluginLoadError (a PDFEditorError subclass, not a raw KeyError),
+    # so both the CLI's and GUI's `except PDFEditorError` handlers
+    # around run-workflow show a clean message instead of crashing.
+    data = {
+        "schema_version": 1,
+        "name": "x",
+        "operations": [{"schema_version": 1, "type": "does_not_exist"}],
+    }
+    with pytest.raises(PluginLoadError):
         deserialize_pipeline(data, registry)
 
 

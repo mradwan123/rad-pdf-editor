@@ -24,6 +24,7 @@ from typing import Any
 import docx
 import fitz
 import openpyxl
+from openpyxl.worksheet.worksheet import Worksheet
 from pptx import Presentation
 from pptx.util import Emu
 
@@ -175,7 +176,16 @@ class PdfToXlsxOperation(Operation):
         out_path = allocate_working_path(doc, suffix=".xlsx")
         workbook = openpyxl.Workbook()
         default_sheet = workbook.active
-        assert default_sheet is not None
+        # openpyxl ships no first-party type stubs for Workbook.active
+        # (it's inferred from the untyped source as the generic
+        # `_WorkbookChild` base, which has no `.append()`) - the
+        # runtime value for a freshly-created Workbook is always a
+        # real Worksheet, confirmed by hand; this isinstance check
+        # makes that a real runtime guarantee, not just a type: ignore,
+        # and narrows for mypy at the same time. Same class of
+        # third-party-stub gap CLAUDE.md already documents for
+        # scikit-image/tifffile in Phase 4.
+        assert isinstance(default_sheet, Worksheet)
         wrote_any = False
         for page_index, tables in enumerate(extract_pdf_tables_by_page(doc.working_path), start=1):
             for table_index, table in enumerate(tables, start=1):

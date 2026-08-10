@@ -410,6 +410,16 @@ class MainWindow(QMainWindow):
                     if result.working_path is None:
                         raise OperationError("Workflow produced no output document.")
                     shutil.copyfile(result.working_path, values["output_path"])
+                    # Every other path that applies an Operation (tool
+                    # dialogs, via AppController.apply_operation; the
+                    # CLI's own run-workflow) records to the audit
+                    # trail - a workflow run through the GUI must too,
+                    # or its steps would be invisible to the audit log
+                    # despite having actually modified a document.
+                    for operation in pipeline.operations:
+                        self.controller.audit_log.record_operation(
+                            operation, document_label=str(values["output_path"])
+                        )
         except PDFEditorError as exc:
             self._show_error(exc)
             return

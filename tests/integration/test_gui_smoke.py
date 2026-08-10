@@ -857,6 +857,73 @@ def test_workflow_builder_move_up_keeps_list_and_operations_in_sync(qapp: QAppli
     dialog.close()
 
 
+def test_workflow_builder_remove_selected_keeps_list_and_operations_in_sync(
+    qapp: QApplication,
+) -> None:
+    from core.registry.registry import Registry, discover_and_load
+
+    registry = Registry()
+    discover_and_load(registry)
+    dialog = WorkflowBuilderDialog(registry)
+
+    op_a = registry.get("rotate_pages").build_operation(angle=90, pages=[])
+    op_b = registry.get("flip").build_operation(direction="horizontal", pages=[])
+    dialog._operations.extend([op_a, op_b])
+    dialog.step_list.addItem(op_a.describe())
+    dialog.step_list.addItem(op_b.describe())
+
+    dialog.step_list.setCurrentRow(0)
+    dialog._remove_selected()
+
+    assert dialog._operations == [op_b]
+    assert dialog.step_list.count() == 1
+    assert dialog.step_list.item(0).text() == op_b.describe()
+    dialog.close()
+
+
+def test_workflow_builder_add_step_shows_error_and_does_not_add_on_invalid_operation(
+    qapp: QApplication,
+) -> None:
+    # Regression coverage: _add_step catches PDFEditorError from
+    # build_operation (e.g. a dialog that accepted invalid input) and
+    # shows an error dialog rather than appending a broken step or
+    # crashing. Exercised via "compress", whose real dialog takes no
+    # input but whose build_operation is stubbed here to fail, so the
+    # error path is proven without depending on any one tool's own
+    # validation quirks.
+    from core.errors import OperationError
+    from core.registry.registry import Registry, discover_and_load
+    from gui.dialogs.compress_dialog import CompressDialog
+
+    registry = Registry()
+    discover_and_load(registry)
+    dialog = WorkflowBuilderDialog(registry)
+    compress_display_name = registry.get("compress").display_name
+
+    def fake_compress_exec(self: CompressDialog) -> QDialog.DialogCode:
+        return QDialog.DialogCode.Accepted
+
+    with (
+        patch(
+            "gui.dialogs.workflow_builder_dialog.QInputDialog.getItem",
+            return_value=(compress_display_name, True),
+        ),
+        patch.object(CompressDialog, "exec", fake_compress_exec),
+        patch.object(
+            type(registry.get("compress")),
+            "build_operation",
+            side_effect=OperationError("boom"),
+        ),
+        patch("gui.dialogs.workflow_builder_dialog.QMessageBox.critical") as mock_critical,
+    ):
+        dialog._add_step()
+
+    mock_critical.assert_called_once()
+    assert dialog.step_list.count() == 0
+    assert dialog._operations == []
+    dialog.close()
+
+
 def test_workflow_builder_accept_rejects_empty_name(qapp: QApplication) -> None:
     from core.registry.registry import Registry, discover_and_load
 
@@ -933,4 +1000,47 @@ def test_run_workflow_applies_saved_pipeline_without_touching_open_document(
         assert int(pdf.pages[0].get("/Rotate", 0)) == 90
     assert len(window.controller.doc.operation_log) == ops_before
     window.controller.close_session()
+    window.close()
+
+
+def test_run_workflow_records_every_step_in_the_audit_log(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    # Regression: unlike every other path that applies an Operation
+    # (AppController.apply_operation, and the CLI's own run-workflow,
+    # see test_run_workflow_records_every_step_in_the_audit_log in
+    # tests/integration/test_cli.py), MainWindow._run_workflow used to
+    # not record anything to the audit trail at all - a GUI-driven
+    # workflow run was invisible to it despite genuinely modifying a
+    # document.
+    from core.model.pipeline import Pipeline
+    from core.registry.registry import Registry, discover_and_load
+    from core.session.audit_log import AuditLog
+    from core.session.workflow_store import WorkflowStore
+
+    registry = Registry()
+    discover_and_load(registry)
+    rotate = registry.get("rotate_pages").build_operation(angle=90, pages=[])
+    watermark = registry.get("watermark").build_operation(
+        text="DRAFT", opacity=0.3, font_size=40
+    )
+    WorkflowStore().save(Pipeline(name="gui_audit_test", operations=[rotate, watermark]))
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    out = tmp_path / "out.pdf"
+
+    window = MainWindow()
+
+    def fake_exec(self: RunWorkflowDialog) -> QDialog.DialogCode:
+        self.workflow_combo.setCurrentText("gui_audit_test")
+        self._input_path = src
+        self._output_path = out
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(RunWorkflowDialog, "exec", fake_exec):
+        window._run_workflow()
+
+    entries = AuditLog().read_all()
+    assert [e["operation"]["type"] for e in entries] == ["rotate_pages", "watermark"]
+    assert all(e["document"] == str(out) for e in entries)
     window.close()
