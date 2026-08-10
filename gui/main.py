@@ -41,6 +41,10 @@ def main() -> int:
     app.setWindowIcon(build_app_icon())
     window = MainWindow()
     window.show()
+    # After show(), not inside MainWindow.__init__: the recovery
+    # prompt is modal, and a constructor that can block on user input
+    # is both bad practice and untestable.
+    window.restore_autosaved_session()
     with network_lockdown():
         return app.exec()
 
