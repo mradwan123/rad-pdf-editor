@@ -904,3 +904,59 @@ to `TOOL_DIALOGS` keys, not the full registry.
 Full suite: **357 passed**, `ruff check .` clean, `mypy core cli gui`
 clean - supersedes the "340/340" figure earlier in this doc, which
 predates the plugin-manifest/installer and review-pass work.
+
+## Tool dialogs widened 25% (done)
+
+Every tool dialog in `gui/dialogs/` got 25% wider. Confirmed before
+touching anything, not assumed: `grep -rn "resize\|setFixedSize\|
+setMinimumWidth\|setMinimumSize\|sizeHint\|setGeometry" gui/dialogs/*.py
+gui/main_window.py` turned up exactly one explicit size call in all
+of `gui/` - `MainWindow.resize(900, 700)`, unrelated to tool dialogs.
+Every dialog's width - including `merge_dialog.py`'s list-plus-buttons
+layout, `FillFormDialog`'s dynamically-built form, and
+`WorkflowBuilderDialog`'s step list - is purely implicit, computed by
+Qt's own layout system via `sizeHint()`, with nothing overriding it
+anywhere.
+
+That made the fix a single centralized override:
+`BaseToolDialog.sizeHint()` (`gui/dialogs/base_tool_dialog.py`) now
+returns `super().sizeHint()` with its width multiplied by
+`_WIDTH_MULTIPLIER = 1.25` (height untouched). No per-dialog file was
+touched - every subclass inherits it automatically, including the two
+with non-standard constructors (`FillFormDialog(field_names, parent)`,
+`WorkflowBuilderDialog(registry, parent)`), confirmed directly rather
+than assumed to "probably still work": both were instantiated
+headlessly and their `sizeHint()` came back at the expected ~1.25x
+ratio same as every plain `(parent=None)` dialog.
+
+Why the override is picked up automatically at dialog-open time, not
+just returned by a getter nobody calls: Qt's own `show()`/`exec()`
+path sizes a top-level widget via `sizeHint()` on first show when
+nothing else has called `resize()`/`setGeometry()` on it - confirmed
+by hand (`dialog.show()` then reading `dialog.width()` back) that the
+live shown width matches the overridden `sizeHint()`, not just that
+the method returns the right number in isolation.
+
+Verified visually, same discipline as the branding pass documented
+above ("a clean pytest run doesn't prove a UI actually looks right"):
+rendered `RotateDialog`, `MergeDialog`, and `WatermarkDialog` to PNG
+via `widget.grab()` under `QT_QPA_PLATFORM=offscreen` and looked at
+them - labels, inputs, and button rows all scale sensibly into the
+extra width, no dialog reads as too wide for its contents or has
+broken-looking dead space.
+
+`tests/unit/test_dialog_sizing.py` (new) asserts the ~1.25x ratio
+against a real "before" value - not a hardcoded pixel baseline that
+would silently rot if a dialog's contents changed - by calling the
+*unmodified* `QDialog.sizeHint(dialog)` directly (unbound, on the same
+live instance) as the "what it would have been without the override"
+comparison point. Covers a plain-constructor dialog (`RotateDialog`),
+`add_full_width`'s custom-widget shape (`MergeDialog`), and both
+non-standard constructors (`FillFormDialog`, `WorkflowBuilderDialog`),
+plus one test asserting `dialog.show()` on a live widget actually
+picks up the widened size, not just `sizeHint()` in isolation. No
+pre-existing test asserted a specific dialog width/size, so nothing
+needed updating for the new expectation.
+
+Full suite: **362 passed** (357 + 5 new), `ruff check .` clean,
+`mypy core cli gui` clean.

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, TypeVar
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -18,6 +18,13 @@ from PySide6.QtWidgets import (
 )
 
 _W = TypeVar("_W", bound=QWidget)
+
+# Every tool dialog is 25% wider than its natural layout-computed width
+# (see sizeHint() override below) - a deliberate sizing decision, not
+# decoration, applied here once so it covers every current and future
+# BaseToolDialog subclass automatically, including ones with
+# non-standard constructors (FillFormDialog, WorkflowBuilderDialog).
+_WIDTH_MULTIPLIER = 1.25
 
 
 class BaseToolDialog(QDialog):
@@ -57,6 +64,21 @@ class BaseToolDialog(QDialog):
     def add_full_width(self, widget: _W) -> _W:
         self._form.addRow(widget)
         return widget
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override, fixed name
+        """No dialog in this codebase sets an explicit size anywhere -
+        every one is purely layout-driven via Qt's own `sizeHint()`
+        machinery (confirmed by grep across gui/dialogs/*.py before
+        this override was added; the only explicit `resize()` call in
+        `gui/` is `MainWindow`'s own, unrelated to tool dialogs). Qt
+        uses this return value to size the dialog on first show() when
+        nothing else has resized it, so widening it here - rather than
+        touching each dialog file - covers every subclass, including
+        ones with non-standard constructors like `FillFormDialog`/
+        `WorkflowBuilderDialog`.
+        """
+        hint = super().sizeHint()
+        return QSize(int(hint.width() * _WIDTH_MULTIPLIER), hint.height())
 
     def values(self) -> dict[str, Any]:
         """Return the kwargs to pass to `ToolPlugin.build_operation()`.
