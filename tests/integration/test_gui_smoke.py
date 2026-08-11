@@ -187,6 +187,39 @@ def test_dragging_a_thumbnail_reorders_the_document(qapp: QApplication, tmp_path
     _force_close(window)
 
 
+def test_reordering_thumbnails_only_affects_the_active_tab(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    # Regression coverage for the multi-tab merge: _on_thumbnails_reordered
+    # is connected per-tab at tab-creation time with the tab bound into
+    # the lambda's default argument (`t=tab`), specifically so a
+    # deferred reorder can't resolve against "whatever tab happens to
+    # be active" by the time its QTimer.singleShot(0, ...) callback
+    # runs. Verified here against real per-tab state, not just that the
+    # signal fired once.
+    a = _make_pdf(tmp_path / "a.pdf", 4)
+    b = _make_pdf(tmp_path / "b.pdf", 3)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+    assert window.current_tab is tab_b
+
+    window.tab_widget.setCurrentWidget(tab_a)
+    moved = tab_a.thumbnail_list.model().moveRow(QModelIndex(), 3, QModelIndex(), 0)
+    assert moved
+    QTest.qWait(50)
+
+    assert [op.serialize()["type"] for op in tab_a.controller.doc.operation_log] == [
+        "reorder_pages"
+    ]
+    assert tab_b.controller.doc.operation_log == []
+    with pikepdf.Pdf.open(tab_a.controller.doc.working_path) as pdf:
+        assert len(pdf.pages) == 4
+    with pikepdf.Pdf.open(tab_b.controller.doc.working_path) as pdf:
+        assert len(pdf.pages) == 3
+    _force_close(window)
+
+
 def test_tool_actions_disabled_without_open_document_except_merge(qapp: QApplication) -> None:
     window = MainWindow()
     assert not window.tool_actions["rotate_pages"].isEnabled()
@@ -1074,6 +1107,44 @@ def test_view_menu_zoom_is_clamped_to_min_and_max(qapp: QApplication) -> None:
     assert window.thumbnail_size.width() == _THUMBNAIL_ZOOM_MIN_WIDTH
 
     window.close()
+
+
+def test_view_menu_zoom_in_keyboard_shortcut_actually_fires(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Regression test for a real user report: "Ctrl++ isn't working."
+
+    QKeySequence.StandardKey.ZoomIn resolves to the literal "Ctrl++",
+    but '+' is Shift+'=' on a US keyboard layout (and varies further on
+    non-US ones) - a user pressing the unshifted "Ctrl+=" saw nothing
+    happen. This drives real QTest key events (not `.trigger()`, which
+    would pass even if no shortcut were bound at all) through the
+    actual QAction shortcut-matching machinery, covering both the
+    literal Ctrl++ (still bound, must keep working) and the added
+    unshifted Ctrl+= alternate.
+    """
+    from gui.main_window import _THUMBNAIL_ZOOM_STEP
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    window.show()
+    _open_tab(window, src)
+    # QTest key events are only routed to shortcuts when the window is
+    # the active one - confirmed by hand while investigating this bug
+    # (a shown-but-not-activated offscreen window silently drops every
+    # QTest.keyClick-driven shortcut, independent of this fix).
+    window.activateWindow()
+    QApplication.processEvents()
+
+    start_width = window.thumbnail_size.width()
+
+    QTest.keyClick(window, Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier)
+    assert window.thumbnail_size.width() == start_width + _THUMBNAIL_ZOOM_STEP
+
+    QTest.keyClick(window, Qt.Key.Key_Plus, Qt.KeyboardModifier.ControlModifier)
+    assert window.thumbnail_size.width() == start_width + 2 * _THUMBNAIL_ZOOM_STEP
+
+    _force_close(window)
 
 
 def test_view_menu_toggle_toolbar_visibility(qapp: QApplication) -> None:

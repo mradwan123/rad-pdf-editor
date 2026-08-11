@@ -1265,3 +1265,118 @@ real files and real state:
 
 Full suite: **398 passed** (362 baseline + 36 new), `ruff check .`
 clean, `mypy core cli gui` clean.
+
+## Thumbnail zoom max raised to 3x, plus a real Ctrl++ bug (done)
+
+**Max zoom: 240px -> 720px** (`_THUMBNAIL_ZOOM_MAX_WIDTH`,
+`gui/main_window.py`), exactly 3x, so a user can zoom in on fine page
+detail (small print, thin diagram lines) rather than only fitting more
+pages on screen at once. Min (60), step (20), and the min-side
+clamping test were untouched - the clamp test already referenced
+`_THUMBNAIL_ZOOM_MAX_WIDTH`/`_THUMBNAIL_ZOOM_MIN_WIDTH` symbolically
+rather than hardcoding 240, so it needed no edit to cover the new
+ceiling.
+
+**No render-resolution bug existed, confirmed rather than assumed.**
+`_render_thumbnails` calls `QPdfDocument.render(i, self.thumbnail_size)`
+- there is no fixed-resolution intermediate cache to outrun, since
+`render()` rasterizes the page directly at whatever `QSize` it's given
+each call. Verified three ways, not just read: (1) a standalone script
+rendering a 15-page fixture (fine 6pt/4pt text plus 0.3pt vertical
+ruling lines, built via `fitz` - the kind of content that visibly
+blurs if upscaled from a smaller source) at both 240px and 720px
+confirmed the returned `QImage`'s actual pixel size matches the
+request exactly (720x960) and the 720px PNG is genuinely crisp, not a
+blown-up 240px render - both saved and looked at directly. (2) The
+existing `QIcon.actualSize()` assertion in
+`test_view_menu_zoom_in_out_and_reset_resize_the_icon_and_rerender`
+already covers this class of bug and continues to pass unmodified at
+the new ceiling. (3) A real `MainWindow`, opened against the same
+15-page fixture, zoomed to the new 720px max via
+`_set_thumbnail_zoom(_THUMBNAIL_ZOOM_MAX_WIDTH)`, and grabbed
+(`widget.grab()`) under `QT_QPA_PLATFORM=offscreen` - the resulting
+PNG shows sharp text/lines and a sensibly-scrolling single-column
+`QListWidget` grid (IconMode wraps/scrolls for free, confirmed rather
+than assumed).
+
+**Performance, measured, not guessed**: the same 15-page fixture's
+full thumbnail set re-rendered at the new 720px max in **0.112s**
+(standalone `QPdfDocument.render` loop) / **0.188s** (through the real
+`MainWindow._set_thumbnail_zoom`, including the white-backdrop
+composite and `QListWidgetItem` construction per page) - both trivial,
+nowhere near the "multi-minute hang" failure mode the task was
+watching for. No intermediate-resolution cap was needed.
+
+**A second, real bug found while exercising the View menu for this
+task** (reported separately by the user as "Ctrl++ and the other
+options aren't working," folded in here since it's the same code):
+`zoom_in_action` was bound only to `QKeySequence.StandardKey.ZoomIn`,
+which resolves to the literal `"Ctrl++"` on this platform (confirmed
+via `QKeySequence.keyBindings(...)`) - but `+` isn't its own physical
+key on most keyboard layouts, it's `Shift+=` on a US layout (and
+varies further on non-US ones), so a user pressing the unshifted
+`Ctrl+=` - the alternate every major app (browsers, editors) also
+binds for exactly this reason - saw nothing happen. Reproduced for
+real, not just reasoned about: a headless `MainWindow` with a real
+`QTest.keyClick(window, Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier)`
+(the unshifted combination) left `thumbnail_size` unchanged, while the
+literal `Key_Plus` combination worked. Fixed by adding an explicit
+`"Ctrl+="` alternate via `setShortcuts()` (plural) alongside every
+binding `QKeySequence.keyBindings(StandardKey.ZoomIn)` already
+provides, rather than replacing the standard binding.
+`test_view_menu_zoom_in_keyboard_shortcut_actually_fires` (new) covers
+this with real `QTest.keyClick` events through the actual Qt shortcut
+-matching machinery, not `.trigger()` (which would pass even if no
+shortcut were bound at all, since it calls the slot directly).
+
+**A real, offscreen-platform-specific testing gotcha found while
+building that test**: `QTest.keyClick`-driven shortcuts are silently
+dropped unless the target window `isActiveWindow()` - under
+`QT_QPA_PLATFORM=offscreen`, a bare `window.show()` does **not**
+activate it (confirmed: `isActiveWindow()` was `False` immediately
+after `show()`), so the new test calls `window.activateWindow()`
+before sending key events. This is believed to be a headless-platform
+testing artifact, not a real-app bug - a normal top-level window shown
+on a real display server is ordinarily the active one - but it's worth
+remembering for any future test that drives shortcuts via `QTest.keyClick`
+rather than `.trigger()`, since every existing View-menu test up to
+this point used `.trigger()` and so never hit it.
+
+**Everything else the bug report asked to double-check was already
+correct, verified live rather than assumed from reading the code**:
+- `_set_thumbnail_zoom` iterates `self.tabs()` (every open tab) for
+  `setIconSize`, and `_refresh()` re-renders only `self.current_tab` -
+  both correctly resolve through the post-multi-tab `MainWindow.controller`
+  /`.thumbnail_list` properties, not a stale single-document reference.
+  All five existing `test_view_menu_*` tests plus the drag-reorder test
+  already passed unmodified going into this task, confirming the
+  wiring itself was never broken by the tabs merge.
+- Toggle Toolbar / Toggle Status Bar / Full Screen were re-checked the
+  same way (existing `test_view_menu_toggle_toolbar_visibility` /
+  `test_view_menu_toggle_status_bar_visibility` /
+  `test_view_menu_full_screen_toggle_reflects_window_state` all still
+  pass) - no fix needed for any of the three.
+
+**Drag-and-drop page reordering was also re-verified for this task**
+(a related report: "add drag-and-drop reordering," which already
+exists per the Phase 1 GUI section above) - genuinely still correct
+after the multi-tab merge, not just assumed from a green test.
+`_add_tab` connects each tab's `rowsMoved` signal with the tab bound
+into the lambda's default argument (`t=tab`) at tab-creation time, so
+a reorder's `QTimer.singleShot(0, ...)` deferral can't resolve against
+"whichever tab happens to be active by the time it runs" - and
+`_apply_thumbnail_reorder`/`_apply_to_tab` take that same `tab`
+parameter throughout, never `self.controller`. Confirmed with a live,
+two-tab check (not just re-running the existing single-tab
+`test_dragging_a_thumbnail_reorders_the_document`): opened tabs A (4
+pages) and B (3 pages), reordered tab A via `model().moveRow(...)`
+while tab B was in the background, and confirmed tab A alone recorded
+the `reorder_pages` operation while tab B's operation log and working
+PDF page count were untouched. Added as a permanent regression test,
+`test_reordering_thumbnails_only_affects_the_active_tab`, rather than
+just a one-off manual check.
+
+Full suite: **405 passed** (403 baseline + 2 new -
+`test_view_menu_zoom_in_keyboard_shortcut_actually_fires` and
+`test_reordering_thumbnails_only_affects_the_active_tab`), `ruff check .`
+clean, `mypy core cli gui` clean.

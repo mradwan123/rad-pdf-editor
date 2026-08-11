@@ -78,7 +78,15 @@ _THUMBNAIL_SIZE = QSize(120, 160)
 # Window-level, not per-tab: it's a property of how this window
 # displays pages, not of any one document.
 _THUMBNAIL_ZOOM_MIN_WIDTH = 60
-_THUMBNAIL_ZOOM_MAX_WIDTH = 240
+# 3x the original 240px max, so users can zoom in on fine page detail
+# (fine print, small diagrams) rather than only seeing more pages at
+# once. QPdfDocument.render() (see _render_thumbnails) always
+# rasterizes directly at the requested QSize - there's no fixed
+# intermediate-resolution cache to outrun - so this stays genuinely
+# sharp at 720px, confirmed by hand and by
+# test_view_menu_zoom_in_out_and_reset_resize_the_icon_and_rerender's
+# QIcon.actualSize() check plus a visual grab() spot-check.
+_THUMBNAIL_ZOOM_MAX_WIDTH = 720
 _THUMBNAIL_ZOOM_STEP = 20
 
 #: Prefix marking a tab whose document has unsaved changes.
@@ -344,7 +352,20 @@ class MainWindow(QMainWindow):
 
     def _build_view_menu(self) -> None:
         self.zoom_in_action = QAction(self.tr("Zoom &In"), self)
-        self.zoom_in_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
+        # QKeySequence.StandardKey.ZoomIn resolves to the literal
+        # "Ctrl++" on this platform (confirmed via
+        # QKeySequence.keyBindings), but '+' isn't its own physical key
+        # on most keyboard layouts - it's Shift+'=' on a US layout, and
+        # varies further on non-US ones. Relying on the standard key
+        # alone means a user who presses the unshifted "Ctrl+=" (the
+        # binding browsers/editors also accept for exactly this reason)
+        # sees nothing happen. setShortcuts (plural) keeps every
+        # platform alternate StandardKey.ZoomIn already provides and
+        # adds the unshifted "Ctrl+=" explicitly, rather than replacing
+        # the standard binding outright.
+        self.zoom_in_action.setShortcuts(
+            [*QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomIn), QKeySequence("Ctrl+=")]
+        )
         self.zoom_in_action.triggered.connect(self._zoom_in)
 
         self.zoom_out_action = QAction(self.tr("Zoom &Out"), self)
