@@ -3,6 +3,7 @@ run without a display server."""
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pikepdf
@@ -263,6 +264,128 @@ def test_close_session_clears_dirty(tmp_path: Path) -> None:
     controller.close_session()
 
     assert not controller.is_dirty
+
+
+def test_two_controllers_are_fully_independent_sessions(tmp_path: Path) -> None:
+    # The whole basis of multi-tab documents: one AppController per
+    # open document, sharing nothing mutable. Checked here, Qt-free,
+    # before any tab UI is involved.
+    from core.ops.organize import RotatePagesOperation
+
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 2)
+    first = AppController()
+    second = AppController()
+    first.open_document(a)
+    second.open_document(b)
+
+    assert first.doc.working_path.parent != second.doc.working_path.parent
+    assert first.session_id != second.session_id
+
+    first.apply_operation(RotatePagesOperation(angle=90))
+
+    assert first.is_dirty
+    assert not second.is_dirty
+    assert second.doc.operation_log == []
+    assert not second.can_undo
+    with pikepdf.Pdf.open(second.doc.working_path) as pdf:
+        assert len(pdf.pages) == 2
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 0
+
+    second_working_dir = second.doc.working_path.parent
+    first.close_session()
+
+    # Closing one document wipes only its own scratch space.
+    assert second_working_dir.exists()
+    assert second.is_open
+    second.close_session()
+
+
+def test_registry_and_audit_log_can_be_shared_between_controllers() -> None:
+    from core.registry.registry import Registry, discover_and_load
+    from core.session.audit_log import AuditLog
+
+    registry = Registry()
+    discover_and_load(registry)
+    audit_log = AuditLog()
+
+    first = AppController(registry, audit_log)
+    second = AppController(registry, audit_log)
+
+    assert first.registry is registry
+    assert second.registry is registry
+    assert first.audit_log is audit_log
+    assert second.audit_log is audit_log
+    # ...and a plain AppController() still builds its own, unchanged.
+    assert AppController().registry is not registry
+
+
+def test_both_controllers_record_into_one_shared_audit_log(tmp_path: Path) -> None:
+    from core.ops.organize import RotatePagesOperation
+    from core.registry.registry import Registry, discover_and_load
+    from core.session.audit_log import AuditLog
+
+    registry = Registry()
+    discover_and_load(registry)
+    audit_log = AuditLog()
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    first = AppController(registry, audit_log)
+    second = AppController(registry, audit_log)
+    first.open_document(a)
+    second.open_document(b)
+
+    first.apply_operation(RotatePagesOperation(angle=90))
+    second.apply_operation(RotatePagesOperation(angle=180))
+
+    entries = audit_log.read_all()
+    assert len(entries) == 2
+    # Each entry names the document it actually belongs to, so one
+    # shared trail stays unambiguous across concurrent documents.
+    assert {e["document"] for e in entries} == {str(a), str(b)}
+    first.close_session()
+    second.close_session()
+
+
+def test_session_id_is_none_until_a_document_is_open(tmp_path: Path) -> None:
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    controller = AppController()
+    assert controller.session_id is None
+
+    controller.open_document(src)
+    assert controller.session_id is not None
+
+    controller.close_session()
+    assert controller.session_id is None
+
+
+def test_restore_from_checkpoint_keeps_identity_and_starts_dirty(tmp_path: Path) -> None:
+    from core.ops.organize import RotatePagesOperation
+
+    src = _make_pdf(tmp_path / "in.pdf", 1)
+    crashed = AppController()
+    crashed.open_document(src)
+    crashed.apply_operation(RotatePagesOperation(angle=90))
+    checkpoint = tmp_path / "checkpoint.pdf"
+    shutil.copyfile(crashed.doc.working_path, checkpoint)
+
+    restored = AppController()
+    restored.restore_from_checkpoint(checkpoint, source_path=src, display_name="in.pdf")
+
+    assert restored.is_open
+    # Identity comes from the crashed document, not the checkpoint file.
+    assert restored.doc.source_path == src
+    assert restored.doc.display_name == "in.pdf"
+    # The recovered state was never saved anywhere, so it's dirty...
+    assert restored.is_dirty
+    # ...and it really is the edited state, in its own private copy.
+    assert restored.doc.working_path != checkpoint
+    with pikepdf.Pdf.open(restored.doc.working_path) as pdf:
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 90
+    with pikepdf.Pdf.open(src) as pdf:
+        assert int(pdf.pages[0].get("/Rotate", 0)) == 0
+    crashed.close_session()
+    restored.close_session()
 
 
 def test_opening_a_new_document_over_a_dirty_one_resets_dirty(tmp_path: Path) -> None:

@@ -1,6 +1,14 @@
-"""Main window: thumbnail grid, Tools menu, undo/redo (SPEC.md section
-2, Phase 1 scope: "basic thumbnail UI + undo/redo wired to the
-framework")."""
+"""Main window: multi-document tabs, thumbnail grids, Tools menu,
+undo/redo (SPEC.md section 2, Phase 1 scope: "basic thumbnail UI +
+undo/redo wired to the framework").
+
+Each tab is an independently editable document backed by its own
+`AppController` (gui/document_tab.py) - own session temp dir, undo/redo
+stack and dirty flag. Everything in here that used to act on "the"
+document now acts on the *current tab*: `self.controller` and
+`self.thumbnail_list` are read-only views onto whichever tab is
+active, and are None when no tab is open.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +23,7 @@ from PySide6.QtGui import QAction, QCloseEvent, QIcon, QImage, QKeySequence, QPa
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
     QLabel,
     QListWidget,
@@ -24,6 +33,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QStackedWidget,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -33,6 +43,13 @@ from core.errors import OperationError, PDFEditorError
 from core.logging_config import get_logger
 from core.model.document import DocumentSession
 from core.ops.forms import list_form_field_names
+from core.registry.registry import Registry, discover_and_load
+from core.session.audit_log import AuditLog
+from core.session.autosave import (
+    discard_active_session,
+    mark_active_session,
+    recover_active_session,
+)
 from core.session.recent_files import RecentFiles
 from core.session.session_dir import SessionTempDir
 from core.session.workflow_store import WorkflowStore
@@ -40,8 +57,14 @@ from gui.controller import AppController
 from gui.dialogs.base_tool_dialog import BaseToolDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
 from gui.dialogs.run_workflow_dialog import RunWorkflowDialog
+from gui.dialogs.tab_placement_dialog import (
+    PLACEMENT_NEW_TAB,
+    PLACEMENT_REPLACE_CURRENT,
+    TabPlacementDialog,
+)
 from gui.dialogs.tool_dialog_registry import TOOL_DIALOGS, DialogFactory
 from gui.dialogs.workflow_builder_dialog import WorkflowBuilderDialog
+from gui.document_tab import DocumentTab
 from gui.resources import build_logo_pixmap
 
 log = get_logger(__name__)
@@ -52,9 +75,14 @@ _THUMBNAIL_SIZE = QSize(120, 160)
 # _THUMBNAIL_SIZE's own aspect ratio, recomputed from the *original*
 # width/height each time rather than compounded step-over-step, so
 # repeated zooming can't drift the aspect ratio away from the source).
+# Window-level, not per-tab: it's a property of how this window
+# displays pages, not of any one document.
 _THUMBNAIL_ZOOM_MIN_WIDTH = 60
 _THUMBNAIL_ZOOM_MAX_WIDTH = 240
 _THUMBNAIL_ZOOM_STEP = 20
+
+#: Prefix marking a tab whose document has unsaved changes.
+_DIRTY_TAB_MARKER = "• "
 
 
 class MainWindow(QMainWindow):
@@ -63,7 +91,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(_APP_NAME)
         self.resize(900, 700)
 
-        self.controller = AppController()
+        # App-wide, shared by every tab's AppController: one plugin
+        # scan and one append-only audit trail for the whole process,
+        # rather than one of each per open document.
+        self.registry = Registry()
+        discover_and_load(self.registry)
+        self.audit_log = AuditLog()
         self.recent_files = RecentFiles()
 
         # Mutable, unlike _THUMBNAIL_SIZE (the fixed default the View >
@@ -71,37 +104,59 @@ class MainWindow(QMainWindow):
         # this and re-renders thumbnails at the new size.
         self.thumbnail_size = QSize(_THUMBNAIL_SIZE)
 
-        self.thumbnail_list = QListWidget()
-        self.thumbnail_list.setAccessibleName(self.tr("Page thumbnails"))
-        self.thumbnail_list.setViewMode(QListWidget.ViewMode.IconMode)
-        self.thumbnail_list.setIconSize(self.thumbnail_size)
-        self.thumbnail_list.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self.thumbnail_list.setMovement(QListWidget.Movement.Static)
-        self.thumbnail_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        # Drag-and-drop page reordering: Qt's own InternalMove handles
-        # the drag gesture and visual reordering; rowsMoved tells us
-        # when a drop actually changed the order so we can apply the
-        # corresponding ReorderPagesOperation (see _on_thumbnails_reordered).
-        self.thumbnail_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
-        self.thumbnail_list.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.thumbnail_list.model().rowsMoved.connect(self._on_thumbnails_reordered)
-        self.thumbnail_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.thumbnail_list.customContextMenuRequested.connect(self._show_thumbnail_context_menu)
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setDocumentMode(True)
+        self.tab_widget.setTabsClosable(True)
+        self.tab_widget.setMovable(True)  # drag-to-reorder tabs
+        self.tab_widget.tabCloseRequested.connect(self._on_tab_close_requested)
+        self.tab_widget.currentChanged.connect(self._on_current_tab_changed)
+        tab_bar = self.tab_widget.tabBar()
+        tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        tab_bar.customContextMenuRequested.connect(self._show_tab_context_menu)
 
         self.empty_state = self._build_empty_state()
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.empty_state)
-        self.stack.addWidget(self.thumbnail_list)
+        self.stack.addWidget(self.tab_widget)
         self.setCentralWidget(self.stack)
 
         self.tool_actions: dict[str, QAction] = {}
         self._build_actions()
         self._refresh()
 
+    # --- current-tab views ------------------------------------------------
+    #
+    # Read-only conveniences so the rest of this class (and the tests)
+    # can say "the document being edited" without repeating the
+    # tab lookup. All three are None when no tab is open - every caller
+    # has to handle that, which is exactly the state the empty-state
+    # welcome screen represents.
+
+    @property
+    def current_tab(self) -> DocumentTab | None:
+        widget = self.tab_widget.currentWidget()
+        return widget if isinstance(widget, DocumentTab) else None
+
+    @property
+    def controller(self) -> AppController | None:
+        tab = self.current_tab
+        return tab.controller if tab is not None else None
+
+    @property
+    def thumbnail_list(self) -> QListWidget | None:
+        tab = self.current_tab
+        return tab.thumbnail_list if tab is not None else None
+
+    def tabs(self) -> list[DocumentTab]:
+        """Every open tab, in tab-bar order (which the user can change
+        by dragging - this always reflects the current visual order)."""
+        widgets = (self.tab_widget.widget(i) for i in range(self.tab_widget.count()))
+        return [w for w in widgets if isinstance(w, DocumentTab)]
+
     def _build_empty_state(self) -> QWidget:
-        """Branded welcome screen shown in place of the thumbnail grid
-        when no document is open."""
+        """Branded welcome screen shown in place of the tab area when
+        no document is open."""
         widget = QWidget()
         widget.setObjectName("emptyState")
 
@@ -138,12 +193,34 @@ class MainWindow(QMainWindow):
         self.open_action.setShortcut("Ctrl+O")
         self.open_action.triggered.connect(self._open_document)
 
+        # Lambdas, not bare bound methods, for every slot whose first
+        # parameter is optional: QAction.triggered carries a `checked`
+        # bool, which PySide6 would happily bind to `_save_as(tab=...)`
+        # / `_close_other_tabs(index=...)` as a positional argument.
         self.save_as_action = QAction(self.tr("&Save As..."), self)
         self.save_as_action.setShortcut("Ctrl+S")
-        self.save_as_action.triggered.connect(self._save_as)
+        self.save_as_action.triggered.connect(lambda: self._save_as())
 
-        self.close_action = QAction(self.tr("&Close Document"), self)
+        self.close_action = QAction(self.tr("&Close Tab"), self)
+        self.close_action.setShortcut("Ctrl+W")
         self.close_action.triggered.connect(self._close_document)
+
+        self.close_other_tabs_action = QAction(self.tr("Close Ot&her Tabs"), self)
+        self.close_other_tabs_action.triggered.connect(lambda: self._close_other_tabs())
+
+        self.close_all_tabs_action = QAction(self.tr("Close &All Tabs"), self)
+        self.close_all_tabs_action.triggered.connect(lambda: self._close_all_tabs())
+
+        # QTabWidget has no built-in tab cycling - these are wired
+        # explicitly (and live in the File menu so their shortcuts are
+        # actually registered with the window, not just declared).
+        self.next_tab_action = QAction(self.tr("&Next Tab"), self)
+        self.next_tab_action.setShortcut("Ctrl+Tab")
+        self.next_tab_action.triggered.connect(lambda: self._cycle_tab(1))
+
+        self.previous_tab_action = QAction(self.tr("&Previous Tab"), self)
+        self.previous_tab_action.setShortcut("Ctrl+Shift+Tab")
+        self.previous_tab_action.triggered.connect(lambda: self._cycle_tab(-1))
 
         self.undo_action = QAction(self.tr("&Undo"), self)
         self.undo_action.setShortcut("Ctrl+Z")
@@ -158,7 +235,13 @@ class MainWindow(QMainWindow):
         self.recent_files_menu = file_menu.addMenu(self.tr("Open &Recent"))
         self.recent_files_menu.aboutToShow.connect(self._populate_recent_files_menu)
         file_menu.addAction(self.save_as_action)
+        file_menu.addSeparator()
         file_menu.addAction(self.close_action)
+        file_menu.addAction(self.close_other_tabs_action)
+        file_menu.addAction(self.close_all_tabs_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.next_tab_action)
+        file_menu.addAction(self.previous_tab_action)
 
         edit_menu = self.menuBar().addMenu(self.tr("&Edit"))
         edit_menu.addAction(self.undo_action)
@@ -221,7 +304,7 @@ class MainWindow(QMainWindow):
             category_menu = tools_menu.addMenu(category_label)
             for tool_id in tool_ids:
                 dialog_cls = TOOL_DIALOGS[tool_id]
-                plugin = self.controller.get_plugin(tool_id)
+                plugin = self.registry.get(tool_id)
                 action = QAction(plugin.display_name, self)
                 action.triggered.connect(self._make_tool_handler(tool_id, dialog_cls))
                 category_menu.addAction(action)
@@ -232,10 +315,10 @@ class MainWindow(QMainWindow):
             raise ValueError(f"Tools menu categories missing tool_id(s): {missing}")
 
         # Building/running a workflow is document-independent (Build
-        # doesn't touch the currently-open document at all; Run works
-        # against a standalone input/output pair), so these two actions
-        # are hand-wired here rather than going through TOOL_DIALOGS /
-        # the Tools-menu loop above, and are never added to
+        # doesn't touch any open document at all; Run works against a
+        # standalone input/output pair), so these two actions are
+        # hand-wired here rather than going through TOOL_DIALOGS / the
+        # Tools-menu loop above, and are never added to
         # self.tool_actions (which _update_action_state disables when
         # no document is open).
         self.build_workflow_action = QAction(self.tr("&Build Workflow..."), self)
@@ -307,7 +390,12 @@ class MainWindow(QMainWindow):
         # drift the aspect ratio away from the source.
         height = round(width * _THUMBNAIL_SIZE.height() / _THUMBNAIL_SIZE.width())
         self.thumbnail_size = QSize(width, height)
-        self.thumbnail_list.setIconSize(self.thumbnail_size)
+        # Window-level, so every tab's grid gets the new icon size, not
+        # just the visible one. Only the current tab is re-rendered
+        # here (see _refresh); a background tab re-renders when it's
+        # next activated, which _on_current_tab_changed handles.
+        for tab in self.tabs():
+            tab.thumbnail_list.setIconSize(self.thumbnail_size)
         # Existing thumbnail pixmaps were rendered at the old size -
         # re-render from the PDF at the new size rather than letting
         # Qt stretch/shrink the old QIcon blurrily.
@@ -350,11 +438,126 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
+    # --- tab management ---------------------------------------------------
+
+    def _add_tab(self, controller: AppController | None = None) -> DocumentTab:
+        """Create, wire up and activate a new document tab."""
+        if controller is None:
+            controller = AppController(self.registry, self.audit_log)
+        tab = DocumentTab(controller, self.thumbnail_size)
+        # Bound to this specific tab rather than resolved as "whatever
+        # is current when the signal arrives": _on_thumbnails_reordered
+        # defers its work to the next event-loop turn, by which point
+        # the current tab could in principle have changed.
+        tab.thumbnail_list.model().rowsMoved.connect(
+            lambda *_args, t=tab: self._on_thumbnails_reordered(t)
+        )
+        tab.thumbnail_list.customContextMenuRequested.connect(
+            lambda pos, t=tab: self._show_thumbnail_context_menu(t, pos)
+        )
+        index = self.tab_widget.addTab(tab, self._tab_label(tab))
+        self.tab_widget.setCurrentIndex(index)
+        return tab
+
+    def _discard_tab(self, tab: DocumentTab) -> None:
+        """Remove `tab` and securely wipe its session temp dir - that
+        one document's working files only, while every other tab keeps
+        its own session intact."""
+        index = self.tab_widget.indexOf(tab)
+        if index != -1:
+            self.tab_widget.removeTab(index)
+        tab.controller.close_session()
+        tab.deleteLater()
+        self._mark_active_session()
+
+    def _tab_label(self, tab: DocumentTab) -> str:
+        name = tab.document_name()
+        return f"{_DIRTY_TAB_MARKER}{name}" if tab.controller.is_dirty else name
+
+    def _update_tab_labels(self) -> None:
+        for index, tab in enumerate(self.tabs()):
+            self.tab_widget.setTabText(index, self._tab_label(tab))
+            source = tab.controller.doc.source_path
+            self.tab_widget.setTabToolTip(index, str(source) if source else tab.document_name())
+
+    def _on_current_tab_changed(self, _index: int) -> None:
+        # A background tab's thumbnails may have been rendered at a
+        # different zoom level (zoom is window-level), so activating a
+        # tab re-renders it rather than showing stale pixmaps.
+        self._refresh()
+        self._mark_active_session()
+
+    def _cycle_tab(self, delta: int) -> None:
+        count = self.tab_widget.count()
+        if count < 2:
+            return
+        self.tab_widget.setCurrentIndex((self.tab_widget.currentIndex() + delta) % count)
+
+    def _on_tab_close_requested(self, index: int) -> None:
+        self._close_tab(index)
+
+    def _close_tab(self, index: int) -> bool:
+        """Close one tab after its own unsaved-changes check. False
+        means the user cancelled and nothing was closed."""
+        widget = self.tab_widget.widget(index)
+        if not isinstance(widget, DocumentTab):
+            return True
+        if not self._confirm_discard_if_dirty(widget):
+            return False
+        self._discard_tab(widget)
+        self._refresh()
+        return True
+
+    def _close_other_tabs(self, index: int | None = None) -> bool:
+        """Close every tab except `index` (the current one by default),
+        each through its own unsaved-changes check. Stops at the first
+        cancelled prompt, leaving that tab and any not-yet-visited ones
+        open."""
+        keep = self.current_tab if index is None else self.tab_widget.widget(index)
+        for tab in self.tabs():
+            if tab is keep:
+                continue
+            if not self._confirm_discard_if_dirty(tab):
+                self._refresh()
+                return False
+            self._discard_tab(tab)
+        self._refresh()
+        return True
+
+    def _close_all_tabs(self) -> bool:
+        """Close every tab, each through its own unsaved-changes check.
+        False means one of them was cancelled - the remaining tabs stay
+        open (and, from closeEvent, the window stays open too)."""
+        for tab in self.tabs():
+            if not self._confirm_discard_if_dirty(tab):
+                self._refresh()
+                return False
+            self._discard_tab(tab)
+        self._refresh()
+        return True
+
+    def _show_tab_context_menu(self, pos: QPoint) -> None:
+        tab_bar = self.tab_widget.tabBar()
+        index = tab_bar.tabAt(pos)
+        if index < 0:
+            return
+        menu = QMenu(self)
+        close_action = menu.addAction(self.tr("Close Tab"))
+        close_others_action = menu.addAction(self.tr("Close Other Tabs"))
+        close_all_action = menu.addAction(self.tr("Close All Tabs"))
+        close_others_action.setEnabled(self.tab_widget.count() > 1)
+
+        chosen = menu.exec(tab_bar.mapToGlobal(pos))
+        if chosen is close_action:
+            self._close_tab(index)
+        elif chosen is close_others_action:
+            self._close_other_tabs(index)
+        elif chosen is close_all_action:
+            self._close_all_tabs()
+
     # --- document lifecycle ----------------------------------------------
 
     def _open_document(self) -> None:
-        if not self._confirm_discard_if_dirty():
-            return
         path_str, _selected_filter = QFileDialog.getOpenFileName(
             self,
             self.tr("Open PDF"),
@@ -366,18 +569,53 @@ class MainWindow(QMainWindow):
             return
         self._open_document_path(Path(path_str))
 
-    def _open_document_path(self, path: Path) -> None:
-        """Shared by the Open dialog and the Recent Files menu."""
+    def _ask_tab_placement(self, document_name: str | None = None) -> str | None:
+        """New Tab / Replace Current Tab / Cancel (None). With nothing
+        open there's nothing to replace and nothing ambiguous, so the
+        prompt is skipped entirely."""
+        if self.tab_widget.count() == 0:
+            return PLACEMENT_NEW_TAB
+        dialog = TabPlacementDialog(document_name, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.placement
+
+    def _open_document_path(self, path: Path, placement: str | None = None) -> None:
+        """Shared by the Open dialog and the Recent Files menu. Asks
+        where to put the document unless the caller already decided."""
+        if placement is None:
+            placement = self._ask_tab_placement(path.name)
+            if placement is None:
+                return
+
+        tab = self.current_tab
+        if placement == PLACEMENT_REPLACE_CURRENT and tab is not None:
+            # Scoped to the tab actually being replaced, not "is
+            # anything anywhere dirty".
+            if not self._confirm_discard_if_dirty(tab):
+                return
+            opened_new_tab = False
+        else:
+            tab = self._add_tab()
+            opened_new_tab = True
+
         try:
-            self.controller.open_document(path)
+            tab.controller.open_document(path)
         except PDFEditorError as exc:
             # A recent-file entry that fails to open (moved/deleted
             # since last time) is stale - drop it so it doesn't keep
             # reappearing in the menu instead of just erroring forever.
             self.recent_files.remove(path)
+            if opened_new_tab:
+                # Don't strand an empty tab for a document that never
+                # opened; a replaced tab keeps its existing document,
+                # which open_document() leaves untouched on failure.
+                self._discard_tab(tab)
             self._show_error(exc)
+            self._refresh()
             return
         self.recent_files.add(path)
+        self._mark_active_session()
         self._refresh()
 
     def _populate_recent_files_menu(self) -> None:
@@ -399,14 +637,17 @@ class MainWindow(QMainWindow):
         return lambda: self._open_recent_file(path)
 
     def _open_recent_file(self, path: Path) -> None:
-        if not self._confirm_discard_if_dirty():
-            return
         self._open_document_path(path)
 
-    def _save_as(self) -> bool:
+    def _save_as(self, tab: DocumentTab | None = None) -> bool:
         """Returns True if the document was actually saved (used by
-        the unsaved-changes prompt to know whether to proceed)."""
-        if not self.controller.is_open:
+        the unsaved-changes prompt to know whether to proceed).
+        Defaults to the current tab; the prompt passes the specific tab
+        it's asking about, which during a multi-tab close may not be
+        the one that was active when the close started."""
+        if tab is None:
+            tab = self.current_tab
+        if tab is None or not tab.controller.is_open:
             return False
         path_str, _selected_filter = QFileDialog.getSaveFileName(
             self,
@@ -418,37 +659,54 @@ class MainWindow(QMainWindow):
         if not path_str:
             return False
         try:
-            self.controller.save_as(Path(path_str))
+            tab.controller.save_as(Path(path_str))
         except PDFEditorError as exc:
             self._show_error(exc)
             return False
+        # The tab's dirty marker is part of its label - saving has to
+        # clear it even when the saved tab isn't the visible one.
+        self._update_tab_labels()
         self.statusBar().showMessage(self.tr("Saved to {0}").format(path_str), 5000)
         return True
 
     def _close_document(self) -> None:
-        if not self._confirm_discard_if_dirty():
+        """File > Close Tab / Ctrl+W - closes the current tab."""
+        index = self.tab_widget.currentIndex()
+        if index < 0:
             return
-        self.controller.close_session()
-        self._refresh()
+        self._close_tab(index)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override, fixed name
-        if not self._confirm_discard_if_dirty():
+        # Every tab is checked, not just the active one: sequential
+        # per-tab Save/Discard/Cancel prompts (each tab is made visible
+        # before it's asked about, so "this document" is unambiguous),
+        # and Cancel on any single one aborts the whole window close,
+        # leaving the tabs that hadn't been reached yet untouched.
+        if not self._close_all_tabs():
             event.ignore()
             return
-        self.controller.close_session()
+        # A clean shutdown leaves nothing to recover - drop the pointer
+        # so the next launch doesn't offer a stale session.
+        mark_active_session(None)
         super().closeEvent(event)
 
-    def _confirm_discard_if_dirty(self) -> bool:
-        """True if it's safe to proceed (open a different file, close,
-        or exit): either there's nothing that could be lost, or the
-        user explicitly chose to save or discard. False means the
-        caller should abort and leave everything as-is."""
-        if not self.controller.is_dirty:
+    def _confirm_discard_if_dirty(self, tab: DocumentTab) -> bool:
+        """True if it's safe to proceed with closing/replacing `tab`:
+        either there's nothing that could be lost, or the user
+        explicitly chose to save or discard. False means the caller
+        should abort and leave everything as-is."""
+        if not tab.controller.is_dirty:
             return True
+        # Make the document being asked about the visible one first -
+        # during a Close All / window close the prompt would otherwise
+        # name a document the user can't see.
+        self.tab_widget.setCurrentWidget(tab)
         response = QMessageBox.warning(
             self,
             self.tr("Unsaved Changes"),
-            self.tr("This document has unsaved changes. Save before continuing?"),
+            self.tr("'{0}' has unsaved changes. Save before continuing?").format(
+                tab.document_name()
+            ),
             QMessageBox.StandardButton.Save
             | QMessageBox.StandardButton.Discard
             | QMessageBox.StandardButton.Cancel,
@@ -457,24 +715,86 @@ class MainWindow(QMainWindow):
         if response == QMessageBox.StandardButton.Cancel:
             return False
         if response == QMessageBox.StandardButton.Save:
-            return self._save_as()
+            return self._save_as(tab)
         return True  # Discard
+
+    # --- crash recovery ---------------------------------------------------
+
+    def restore_autosaved_session(self) -> bool:
+        """Offer to reopen the most recently active tab from the last
+        run if it died without closing cleanly (core/session/autosave.py's
+        pointer). Returns True if a document was actually restored.
+
+        Called from gui/main.py after the window is shown, not from
+        __init__ - a modal prompt fired from a constructor is both bad
+        practice and untestable without every MainWindow() in the suite
+        blocking on it.
+        """
+        recovery = recover_active_session()
+        if recovery is None or recovery.checkpoint_path is None:
+            return False
+        name = recovery.display_name or (
+            recovery.source_path.name if recovery.source_path else self.tr("Untitled")
+        )
+        response = QMessageBox.question(
+            self,
+            self.tr("Restore Document"),
+            self.tr(
+                "'{0}' was open when the app last closed unexpectedly. "
+                "Restore the unsaved version?"
+            ).format(name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        restored = False
+        if response == QMessageBox.StandardButton.Yes:
+            tab = self._add_tab()
+            try:
+                tab.controller.restore_from_checkpoint(
+                    recovery.checkpoint_path,
+                    source_path=recovery.source_path,
+                    display_name=recovery.display_name,
+                )
+                restored = True
+            except PDFEditorError as exc:
+                self._discard_tab(tab)
+                self._show_error(exc)
+        # Either way the offer is consumed: the crashed session's
+        # journal is wiped (its data is either now in a live tab or
+        # explicitly declined) so it can't be offered again next launch.
+        discard_active_session()
+        self._mark_active_session()
+        self._refresh()
+        return restored
+
+    def _mark_active_session(self) -> None:
+        """Record which tab's session crash recovery should offer next
+        time - the currently active one (see decision: v1 restores the
+        most recently active tab, not every open tab)."""
+        controller = self.controller
+        mark_active_session(controller.session_id if controller is not None else None)
 
     # --- undo/redo ---------------------------------------------------------
 
     def _undo(self) -> None:
+        controller = self.controller
+        if controller is None:
+            return
         try:
             with self._busy_cursor():
-                self.controller.undo()
+                controller.undo()
         except PDFEditorError as exc:
             self._show_error(exc)
             return
         self._refresh()
 
     def _redo(self) -> None:
+        controller = self.controller
+        if controller is None:
+            return
         try:
             with self._busy_cursor():
-                self.controller.redo()
+                controller.redo()
         except PDFEditorError as exc:
             self._show_error(exc)
             return
@@ -483,37 +803,46 @@ class MainWindow(QMainWindow):
     # --- tools ---------------------------------------------------------------
 
     def _run_tool(self, tool_id: str, dialog_cls: DialogFactory) -> None:
-        if tool_id != "merge" and not self.controller.is_open:
+        tab = self.current_tab
+        if tool_id != "merge" and (tab is None or not tab.controller.is_open):
             self._show_error_message(self.tr("Open a document first."))
             return
 
         if tool_id == "fill_form":
-            working_path = self.controller.doc.working_path
-            assert working_path is not None  # guaranteed by the is_open check above
+            assert tab is not None  # guaranteed by the check above
+            working_path = tab.controller.doc.working_path
+            assert working_path is not None
             dialog: BaseToolDialog = FillFormDialog(list_form_field_names(working_path), self)
         else:
             dialog = dialog_cls(self)
 
         if dialog.exec() != BaseToolDialog.DialogCode.Accepted:
             return
+        if tab is None:
+            # Merge with no tabs open: it builds a document from
+            # scratch, so it gets a fresh tab - created only now that
+            # the dialog was actually accepted, so a cancelled Merge
+            # can't strand an empty tab.
+            tab = self._add_tab()
         try:
-            plugin = self.controller.get_plugin(tool_id)
+            plugin = self.registry.get(tool_id)
             operation = plugin.build_operation(**dialog.values())
             with self._busy_cursor():
-                self.controller.apply_operation(operation)
+                tab.controller.apply_operation(operation)
         except PDFEditorError as exc:
             self._show_error(exc)
             return
+        finally:
+            self._mark_active_session()
         self._refresh()
 
     # --- workflows -------------------------------------------------------------
 
     def _build_workflow(self) -> None:
         """Document-independent by design: a workflow is a saved,
-        named sequence of Operations, not a live edit against
-        self.controller's currently-open document (that's what
-        _run_tool is for)."""
-        dialog = WorkflowBuilderDialog(self.controller.registry, self)
+        named sequence of Operations, not a live edit against any open
+        tab's document (that's what _run_tool is for)."""
+        dialog = WorkflowBuilderDialog(self.registry, self)
         if dialog.exec() != BaseToolDialog.DialogCode.Accepted:
             return
         pipeline = dialog.build_pipeline()
@@ -528,11 +857,12 @@ class MainWindow(QMainWindow):
 
     def _run_workflow(self) -> None:
         """A standalone batch run against an input/output file pair -
-        deliberately not touching self.controller's document or undo
-        stack (only its audit_log, to record the steps), the same
-        "external file(s) in" shape Merge and the Phase 3 conversion
-        ops already use, run through a throwaway SessionTempDir rather
-        than the app's live editing session."""
+        deliberately touching no tab's AppController, document or undo
+        stack (only the app-wide audit_log, to record the steps), the
+        same "external file(s) in" shape Merge and the Phase 3
+        conversion ops already use, run through a throwaway
+        SessionTempDir rather than any live editing session. It never
+        opens a tab either."""
         names = WorkflowStore().list_workflows()
         if not names:
             QMessageBox.information(
@@ -549,7 +879,7 @@ class MainWindow(QMainWindow):
         try:
             values = dialog.values()
             with self._busy_cursor():
-                pipeline = WorkflowStore().load(values["workflow_name"], self.controller.registry)
+                pipeline = WorkflowStore().load(values["workflow_name"], self.registry)
                 with SessionTempDir() as session:
                     input_path: Path = values["input_path"]
                     working = session.path / f"working{input_path.suffix or '.pdf'}"
@@ -566,7 +896,7 @@ class MainWindow(QMainWindow):
                     # or its steps would be invisible to the audit log
                     # despite having actually modified a document.
                     for operation in pipeline.operations:
-                        self.controller.audit_log.record_operation(
+                        self.audit_log.record_operation(
                             operation, document_label=str(values["output_path"])
                         )
         except PDFEditorError as exc:
@@ -579,25 +909,28 @@ class MainWindow(QMainWindow):
     # --- rendering ------------------------------------------------------------
 
     def _refresh(self) -> None:
-        self.thumbnail_list.clear()
-        working_path = self.controller.doc.working_path
-        if self.controller.is_open and working_path is not None:
-            self._render_thumbnails(working_path)
-            label = self.controller.doc.display_name or (
-                self.controller.doc.source_path.name
-                if self.controller.doc.source_path
-                else self.tr("Untitled")
+        tab = self.current_tab
+        if tab is not None:
+            self._render_tab(tab)
+            self.setWindowTitle(f"{_APP_NAME} - {tab.document_name()}")
+            self.statusBar().showMessage(
+                self.tr("{0} page(s)").format(tab.thumbnail_list.count())
             )
-            self.setWindowTitle(f"{_APP_NAME} - {label}")
-            self.statusBar().showMessage(self.tr("{0} page(s)").format(self.thumbnail_list.count()))
-            self.stack.setCurrentWidget(self.thumbnail_list)
+            self.stack.setCurrentWidget(self.tab_widget)
         else:
             self.setWindowTitle(_APP_NAME)
             self.statusBar().showMessage(self.tr("No document open"))
             self.stack.setCurrentWidget(self.empty_state)
+        self._update_tab_labels()
         self._update_action_state()
 
-    def _render_thumbnails(self, path: Path) -> None:
+    def _render_tab(self, tab: DocumentTab) -> None:
+        tab.thumbnail_list.clear()
+        working_path = tab.controller.doc.working_path
+        if tab.controller.is_open and working_path is not None:
+            self._render_thumbnails(tab.thumbnail_list, working_path)
+
+    def _render_thumbnails(self, thumbnail_list: QListWidget, path: Path) -> None:
         # No parent: this is a short-lived, throwaway document used
         # only to render thumbnails for this one _refresh() call. A
         # `self`-parented QPdfDocument would live as long as
@@ -628,21 +961,21 @@ class MainWindow(QMainWindow):
             # back in visual order by _apply_thumbnail_reorder to
             # build the ReorderPagesOperation's page_order.
             item.setData(Qt.ItemDataRole.UserRole, i + 1)
-            self.thumbnail_list.addItem(item)
+            thumbnail_list.addItem(item)
 
-    def _on_thumbnails_reordered(self, *args: object) -> None:
+    def _on_thumbnails_reordered(self, tab: DocumentTab) -> None:
         # Deferred to the next event loop turn: applying an operation
-        # (which rebuilds thumbnail_list via _refresh) from directly
-        # inside the model's own rowsMoved signal would fight with
-        # Qt's own post-move bookkeeping for the same signal - the
+        # (which rebuilds the tab's thumbnail list via _refresh) from
+        # directly inside the model's own rowsMoved signal would fight
+        # with Qt's own post-move bookkeeping for the same signal - the
         # standard-idiom fix is to let the current emission finish
         # first (see QTimer.singleShot(0, ...)).
-        QTimer.singleShot(0, self._apply_thumbnail_reorder)
+        QTimer.singleShot(0, lambda: self._apply_thumbnail_reorder(tab))
 
-    def _apply_thumbnail_reorder(self) -> None:
+    def _apply_thumbnail_reorder(self, tab: DocumentTab) -> None:
         page_order = [
-            self.thumbnail_list.item(i).data(Qt.ItemDataRole.UserRole)
-            for i in range(self.thumbnail_list.count())
+            tab.thumbnail_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(tab.thumbnail_list.count())
         ]
         if page_order == list(range(1, len(page_order) + 1)):
             # No actual change (e.g. a drag that ends where it started,
@@ -652,21 +985,10 @@ class MainWindow(QMainWindow):
             # sequential order). Applying here would push a no-op
             # ReorderPagesOperation onto the undo stack for nothing.
             return
-        try:
-            plugin = self.controller.get_plugin("reorder_pages")
-            operation = plugin.build_operation(page_order=page_order)
-            with self._busy_cursor():
-                self.controller.apply_operation(operation)
-        except PDFEditorError as exc:
-            self._show_error(exc)
-        # Refresh either way: on success this rebuilds thumbnails from
-        # the new document (confirming the drag), on failure it
-        # discards the stale drag-and-drop visual order so the grid
-        # matches the actual (unchanged) document again.
-        self._refresh()
+        self._apply_to_tab(tab, "reorder_pages", page_order=page_order)
 
-    def _show_thumbnail_context_menu(self, pos: QPoint) -> None:
-        selected = self.thumbnail_list.selectedItems()
+    def _show_thumbnail_context_menu(self, tab: DocumentTab, pos: QPoint) -> None:
+        selected = tab.thumbnail_list.selectedItems()
         if not selected:
             return
         pages = sorted(int(item.data(Qt.ItemDataRole.UserRole)) for item in selected)
@@ -677,42 +999,47 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         delete_action = menu.addAction(self.tr("Delete Selected"))
 
-        chosen = menu.exec(self.thumbnail_list.viewport().mapToGlobal(pos))
+        chosen = menu.exec(tab.thumbnail_list.viewport().mapToGlobal(pos))
         if chosen is rotate_left_action:
-            self._apply_thumbnail_rotate(pages, angle=-90)
+            self._apply_thumbnail_rotate(tab, pages, angle=-90)
         elif chosen is rotate_right_action:
-            self._apply_thumbnail_rotate(pages, angle=90)
+            self._apply_thumbnail_rotate(tab, pages, angle=90)
         elif chosen is delete_action:
-            self._apply_thumbnail_delete(pages)
+            self._apply_thumbnail_delete(tab, pages)
 
-    def _apply_thumbnail_rotate(self, pages: list[int], angle: int) -> None:
+    def _apply_thumbnail_rotate(self, tab: DocumentTab, pages: list[int], angle: int) -> None:
+        self._apply_to_tab(tab, "rotate_pages", angle=angle, pages=pages)
+
+    def _apply_thumbnail_delete(self, tab: DocumentTab, pages: list[int]) -> None:
+        self._apply_to_tab(tab, "delete_pages", pages=pages)
+
+    def _apply_to_tab(self, tab: DocumentTab, tool_id: str, **kwargs: Any) -> None:
+        """Apply a dialog-free operation (thumbnail drag-reorder,
+        context-menu rotate/delete) to one specific tab's document."""
         try:
-            plugin = self.controller.get_plugin("rotate_pages")
-            operation = plugin.build_operation(angle=angle, pages=pages)
+            operation = self.registry.get(tool_id).build_operation(**kwargs)
             with self._busy_cursor():
-                self.controller.apply_operation(operation)
+                tab.controller.apply_operation(operation)
         except PDFEditorError as exc:
             self._show_error(exc)
-            return
-        self._refresh()
-
-    def _apply_thumbnail_delete(self, pages: list[int]) -> None:
-        try:
-            plugin = self.controller.get_plugin("delete_pages")
-            operation = plugin.build_operation(pages=pages)
-            with self._busy_cursor():
-                self.controller.apply_operation(operation)
-        except PDFEditorError as exc:
-            self._show_error(exc)
-            return
+        # Refresh either way: on success this rebuilds thumbnails from
+        # the new document (confirming the change), on failure it
+        # discards any stale drag-and-drop visual order so the grid
+        # matches the actual (unchanged) document again.
         self._refresh()
 
     def _update_action_state(self) -> None:
-        is_open = self.controller.is_open
+        controller = self.controller
+        is_open = controller is not None and controller.is_open
+        tab_count = self.tab_widget.count()
         self.save_as_action.setEnabled(is_open)
-        self.close_action.setEnabled(is_open)
-        self.undo_action.setEnabled(self.controller.can_undo)
-        self.redo_action.setEnabled(self.controller.can_redo)
+        self.close_action.setEnabled(tab_count > 0)
+        self.close_other_tabs_action.setEnabled(tab_count > 1)
+        self.close_all_tabs_action.setEnabled(tab_count > 0)
+        self.next_tab_action.setEnabled(tab_count > 1)
+        self.previous_tab_action.setEnabled(tab_count > 1)
+        self.undo_action.setEnabled(controller is not None and controller.can_undo)
+        self.redo_action.setEnabled(controller is not None and controller.can_redo)
         for tool_id, action in self.tool_actions.items():
             action.setEnabled(is_open or tool_id == "merge")
 

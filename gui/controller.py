@@ -25,14 +25,26 @@ log = get_logger(__name__)
 
 
 class AppController:
-    """Owns the registry, the current session's temp dir/autosave
-    journal, and the live `DocumentSession`. One instance per running
-    GUI process."""
+    """Owns one open document: its session temp dir, autosave journal,
+    live `DocumentSession`, undo/redo stack and dirty flag.
 
-    def __init__(self) -> None:
-        self.registry = Registry()
-        discover_and_load(self.registry)
-        self.audit_log = AuditLog()
+    **One instance per open document tab**, not per process (that was
+    true up to the multi-tab work - see CLAUDE.md). Everything that is
+    genuinely app-wide rather than per-document is passed in and
+    shared: the plugin `Registry` (rebuilding it per tab would rescan
+    and re-import every plugin for nothing) and the `AuditLog` (one
+    append-only trail for the whole app, with each entry already
+    carrying its own `document_label`). Both default to a
+    freshly-built private instance so a standalone `AppController()` -
+    as the unit tests construct - still works exactly as before.
+    """
+
+    def __init__(self, registry: Registry | None = None, audit_log: AuditLog | None = None) -> None:
+        if registry is None:
+            registry = Registry()
+            discover_and_load(registry)
+        self.registry = registry
+        self.audit_log = audit_log if audit_log is not None else AuditLog()
         self._session: SessionTempDir | None = None
         self._autosave: AutosaveJournal | None = None
         self.doc = DocumentSession(working_path=None, source_path=None)
@@ -41,6 +53,14 @@ class AppController:
     @property
     def is_open(self) -> bool:
         return self.doc.working_path is not None
+
+    @property
+    def session_id(self) -> str | None:
+        """This document's session id, or None before any session temp
+        dir exists. Used by the GUI to record which tab was most
+        recently active for crash recovery (core/session/autosave.py's
+        `mark_active_session`)."""
+        return self._session.session_id if self._session is not None else None
 
     @property
     def is_dirty(self) -> bool:
@@ -90,6 +110,34 @@ class AppController:
         self._autosave = AutosaveJournal(new_session.session_id)
         self.doc = DocumentSession(working_path=working, source_path=path)
         self._dirty = False
+        self._checkpoint()
+
+    def restore_from_checkpoint(
+        self,
+        checkpoint: Path,
+        *,
+        source_path: Path | None = None,
+        display_name: str | None = None,
+    ) -> None:
+        """Open an autosave checkpoint as the current document.
+
+        Same private-working-copy path as `open_document` (the
+        checkpoint file itself is left alone), but the restored session
+        keeps the *original* document's identity - `source_path` /
+        `display_name` come from the journal, not from the checkpoint
+        file's own name - and starts **dirty**, because by definition
+        the recovered state was never saved anywhere. The undo history
+        is not restored: the autosave journal stores serialized
+        operations, not re-appliable ones (see core/session/autosave.py's
+        module docstring).
+        """
+        self.open_document(checkpoint)
+        self.doc = DocumentSession(
+            working_path=self.doc.working_path,
+            source_path=source_path,
+            display_name=display_name,
+        )
+        self._dirty = True
         self._checkpoint()
 
     def apply_operation(self, operation: Operation) -> None:
