@@ -1265,3 +1265,109 @@ real files and real state:
 
 Full suite: **398 passed** (362 baseline + 36 new), `ruff check .`
 clean, `mypy core cli gui` clean.
+
+## Dialog button-truncation audit (done; nothing was actually broken)
+
+Follow-up to "Tool dialogs widened 25%" above: that flat multiplier
+was a heuristic, not a verified guarantee that no button in the app
+ever renders narrower than its own text needs. This pass measured it
+for real instead of trusting the ratio, across every popup window in
+`gui/` - all 36 `TOOL_DIALOGS` entries (`gui/dialogs/tool_dialog_registry.py`),
+the non-standard-constructor dialogs (`FillFormDialog` with real long
+field names, `WorkflowBuilderDialog`, `RunWorkflowDialog`), and
+`TabPlacementDialog` (the multi-tab feature's plain `QDialog` subclass
+that does **not** inherit `BaseToolDialog`'s widened `sizeHint()` at
+all - see "Multi-document tabs" above for why it can't be a
+`QMessageBox`). Also spot-checked one `QMessageBox` (the Save/Discard/
+Cancel unsaved-changes prompt) and the one `QInputDialog.getItem` call
+(`WorkflowBuilderDialog._add_step`'s tool picker) - both are stock Qt
+static dialogs, well-tested by Qt itself, and both measured clean.
+
+**The finding: no dialog in the app actually truncates any button
+text.** Not "close enough" - every `QPushButton` in every dialog
+instantiated headlessly (`QT_QPA_PLATFORM=offscreen`), shown, and
+measured rendered at least as wide as its own `QPushButton.sizeHint().width()`.
+
+This is worth trusting specifically because of how it was measured,
+not just asserted: the first attempt used the method the task
+suggested at face value - `QFontMetrics(button.font()).horizontalAdvance(text)`
+plus a flat guessed pixel padding (24px) - and it produced a **false
+positive** on `MergeDialog`/`WorkflowBuilderDialog`'s "Remove Selected"
+button (flagged as needing 120px, rendering at 112px). Checked by hand
+before trusting it: `QPushButton.sizeHint()` for that exact text
+computes 110px using the real active style's actual button padding
+(confirmed separately: Fusion's real per-button padding for
+longer-than-minimum-width text is ~14-20px, not the guessed 24px) - so
+112px was never actually truncated, the flat-padding heuristic was
+just wrong. Switched the real check to comparing a button's live
+rendered width against its own `sizeHint().width()`, which is Qt's
+own style-and-font-aware computation of "how wide this button needs to
+be to show this text" - confirmed safe to call after the widget is
+already placed in a layout and shown (it keeps returning the
+widget's *unstretched* preferred size, not whatever the layout
+assigned it, verified by reading it back on an already-shown button).
+
+**Why this holds structurally, not by coincidence of current text
+lengths**: every dialog in `gui/dialogs/` is purely layout-driven
+(same grep-confirmed fact "Tool dialogs widened 25%" already
+established - no `resize()`/`setFixedSize()`/`setMinimumWidth()`
+anywhere). A `QVBoxLayout`'s width `sizeHint()` is the max of its rows'
+own widths, so a dialog's natural top-level width can never come out
+narrower than its widest row - including the button row - as long as
+nothing later imposes a smaller explicit size. `MergeDialog`/
+`WorkflowBuilderDialog`'s custom button row (a `QHBoxLayout` of four
+`QPushButton`s, unlike every other dialog's plain `QDialogButtonBox`)
+does redistribute the widened dialog's leftover width *evenly* across
+all four buttons once shown - confirmed directly (all four came back
+at the identical 112px, not their individual natural widths) - but
+that redistribution only ever *adds* width beyond each button's own
+`sizeHint()`, never subtracts, so it doesn't produce truncation
+either; it was just the reason the flat-padding heuristic's false
+positive landed on those two dialogs specifically. `TabPlacementDialog`
+needed no fix either, for a related but distinct reason: it uses
+`QDialogButtonBox.addButton()` (not a hand-rolled `QHBoxLayout`), and
+`QDialogButtonBox` lays each button out at its own natural preferred
+width rather than stretching/redistributing - so it was never at risk
+even without inheriting `BaseToolDialog`'s 25% multiplier. Tested both
+with and without a `document_name` (the longest-button case,
+"Replace Current Tab", renders identically either way, since the
+label's `wordWrap` never forces the dialog narrower than the button
+row needs).
+
+Per the task's own instruction not to manufacture a finding that isn't
+real: **no per-dialog fix was made** - `BaseToolDialog.sizeHint()`'s
+`_WIDTH_MULTIPLIER` and every dialog's layout are unchanged.
+`TabPlacementDialog` was deliberately left as a plain `QDialog` too -
+adopting `BaseToolDialog`'s override would have been solving a problem
+it doesn't have, and would come with `BaseToolDialog`'s modal
+OK/Cancel-button-box shape that this dialog intentionally doesn't use
+(its three choices are three real `AcceptRole`/`RejectRole` buttons,
+not an options-form-plus-OK/Cancel).
+
+Verified visually too, same discipline as every prior sizing/branding
+pass: rendered `MergeDialog`, `WorkflowBuilderDialog`,
+`TabPlacementDialog` (the three flagged by the discarded false-positive
+heuristic, for direct comparison) plus `RotateDialog`, `WatermarkDialog`,
+`RunWorkflowDialog` (known-good contrast cases, the latter with a
+deliberately long saved-workflow name in its combo box) to PNG via
+`widget.grab()` under `QT_QPA_PLATFORM=offscreen` and looked at them -
+every button's full label is visible with normal padding, no dialog
+reads as cramped.
+
+`tests/unit/test_dialog_sizing.py` gained the real per-dialog
+button-width audit: a parametrized test over every `TOOL_DIALOGS`
+tool_id (all 36, via the shared registry - not just the 3-4 dialogs
+the original flat-25%-ratio tests happened to cover), plus dedicated
+tests for `FillFormDialog` (with real, deliberately long field names,
+not the placeholder empty-list factory `TOOL_DIALOGS["fill_form"]`
+uses), `WorkflowBuilderDialog`, `RunWorkflowDialog`, and
+`TabPlacementDialog` (parametrized over both a real document name and
+`None`). Each asserts every `QPushButton`'s live rendered width is
+`>=` its own `sizeHint().width()` after a real `show()` - the
+authoritative, style-and-font-aware check, not a hand-rolled font-
+metrics-plus-guessed-padding stand-in (that version is kept only as a
+narrative example above of why it's the wrong tool for this, not
+shipped as a test). The pre-existing 25%-ratio tests are untouched.
+
+Full suite: **444 passed** (403 baseline + 41 new), `ruff check .`
+clean, `mypy core cli gui` clean.
