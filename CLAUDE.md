@@ -1665,3 +1665,121 @@ left for a separate change rather than done speculatively here.
 
 Full suite: **420 passed** (403 baseline + 17 new), `ruff check .`
 clean, `mypy core cli gui` clean.
+
+## Black-empty-tab bug: fixed (root cause was in `_add_tab`, not tab-switching)
+
+User report: "opening a new tab shows a black, empty tab - the PDF
+content never appears." A correction narrowed it: the tab created for
+a *second* document actually renders fine - the black tab was some
+*other* tab. That pointed initial suspicion at tab-*switching*
+(reactivating a backgrounded tab), not tab-*creation*.
+
+**Tab-switching itself was checked exhaustively and is not the bug.**
+Before touching any code: opened two/three tabs with distinctly-
+colored fixture pages (real fitz-drawn rects, not blank pikepdf pages,
+so pixel sampling could tell "genuinely rendered" from "stale/wrong"),
+switched between them 20+ times via `setCurrentWidget`, via real
+`QTest.mouseClick` on the tab bar, out of order, after closing a
+background tab, and via the drag-reorder `QTimer.singleShot(0, ...)`
+deferral racing against a tab switch (switch tabs *before* the
+deferred reorder-apply callback fires, then let it run) - every one of
+these, sampled by real pixel value via `grab()` and via
+`icon().pixmap().toImage().pixelColor(...)`, rendered correctly every
+time, both with and without the dark palette/stylesheet applied
+(`gui/palette.py` / `gui/styles.qss` - not loaded by a bare `MainWindow()`
+in a script, only by `gui/main.py`, so this had to be applied by hand
+to match what a real run looks like). `_refresh()`/`_render_tab`
+always fully clear-and-rebuild the *current* tab's list from disk on
+every call, unconditionally, so any staleness from a background
+mutation (e.g. the reorder race) self-heals the instant that tab
+becomes current again - there's no "only renders once per tab
+lifetime" guard anywhere to have gone wrong.
+
+**Root cause, found by capturing the actual transient state, not by
+reasoning about timing**: `MainWindow._add_tab` called
+`self.tab_widget.setCurrentIndex(index)` right after `addTab`. Making
+a tab current fires `currentChanged` *synchronously*, which
+`_on_current_tab_changed` turns straight into a full `_refresh()` -
+and every one of `_add_tab`'s three call sites (`_open_document_path`,
+`restore_autosaved_session`, `_run_tool`'s Merge-with-no-document
+case) only loads/builds the actual document *after* `_add_tab`
+returns. So the brand-new tab gets rendered once *before* it has a
+document at all. Confirmed by literally patching `MainWindow._add_tab`
+to `grab()` the window the instant it returns, with the dark
+stylesheet applied: the result was a real, on-screen "Rad PDF Editor -
+Untitled" window with "0 page(s)" in the status bar and a plain dark
+`#17181a` thumbnail grid (its own empty background - styles.qss's
+`QListWidget` color) where the thumbnails should be. That screenshot
+*is* the bug report, word for word - a real, `grab()`-capturable frame,
+not a hypothetical.
+
+Why a synchronous test script didn't stumble onto this on its own: the
+real content-loading call and a second, correct `_refresh()` happen
+immediately afterward in the same call stack, with no event-loop turn
+in between - so end-to-end pixel checks that only look at the *final*
+state always saw the correct, overwritten result. It took deliberately
+capturing the *intermediate* state (patching `_add_tab` to grab
+immediately on return, before its caller has done anything else) to
+see it. In a real running app, anything that forces a repaint between
+those two points - a slow file copy for a large PDF, a window-manager-
+driven redraw - can expose this frame for real; the caller's own
+`open_document()`/`apply_operation()`/`restore_from_checkpoint()` call
+is exactly the kind of I/O that isn't guaranteed to be instant.
+
+**Fix**: `_add_tab` gained an `activate: bool = True` parameter. All
+three real call sites now pass `activate=False` and only activate the
+tab - via `self.tab_widget.setCurrentWidget(tab)` - once its document
+has actually loaded/built successfully; on failure the tab is
+discarded exactly as before, now with the added guarantee that it was
+never shown with content at all (not even the empty flash). One
+subtlety, found by testing rather than assumed: adding the very
+*first* tab to an empty `QTabWidget` makes Qt auto-select it (confirmed
+directly: `addTab` alone, with no `setCurrentIndex` call at all, still
+fires `currentChanged`) - so `activate=False` blocks the tab widget's
+signals for the `addTab` call itself, not just skips the explicit
+`setCurrentIndex`. That also means `setCurrentWidget(tab)` afterward
+is a silent no-op for the very-first-tab case (already current, no
+index change, no signal) - which is why every call site still keeps
+its own explicit trailing `_refresh()` rather than relying on
+`setCurrentWidget` alone to trigger it. Verified end-to-end after the
+fix, same patched-`_add_tab`-grab() technique: mid-load, the window
+now keeps showing the *previous* tab's real content (or, for the very
+first tab, stays on the branded empty-state welcome screen) - never an
+empty "Untitled" tab.
+
+**A second, related gap fixed in the same pass**: Merge-with-no-
+document already avoided stranding a tab for a *cancelled* dialog
+(existing behavior), but not for an *accepted* dialog whose build then
+fails (e.g. every selected input file is missing/invalid) -
+`apply_operation` raising left the freshly-created, permanently
+content-less tab sitting in the tab bar. Fixed alongside the
+`activate=False` change: the tab is discarded in that `except` branch
+too, matching the pattern `_open_document_path`'s failure branch
+already used.
+
+**Regression tests** (`tests/integration/test_gui_smoke.py`, 7 new):
+two target the root cause directly, by patching
+`AppController.open_document` to assert *mid-call* that the window is
+still showing the old tab (or the empty-state screen, for the very
+first tab) rather than the new one - proving activation is genuinely
+deferred, not just that the end state happens to look right. The rest
+are the pixel-level symptom checks the task asked for specifically
+because "wrong but non-empty" is a failure mode `count() > 0` alone
+would miss: opening a second tab, switching back and forth between two
+tabs five times each direction, a third tab with out-of-order
+switching, replacing the current tab, and the Merge-failure tab-
+stranding case - all via `_make_colored_pdf` (real fitz-drawn colored
+rects) and `_thumbnail_center_pixel` (samples the actual built
+`QIcon`/`QPixmap`), new small helpers alongside the existing
+`_make_pdf`/`_open_tab`.
+
+All three tab-creation paths were re-checked against the fix, not just
+the one that turned out to be broken: **New Tab and the very-first-
+tab-with-zero-tabs-open case were the ones exhibiting the transient
+black frame** (both go through `_add_tab`); **Replace Current Tab
+never did** (it re-uses the already-current tab and never calls
+`_add_tab` at all - confirmed both before and after the fix, screenshot-
+verified, still correct and unchanged by this fix).
+
+Full suite: **470 passed** (463 baseline + 7 new), `ruff check .`
+clean, `mypy core cli gui` clean.

@@ -462,8 +462,53 @@ class MainWindow(QMainWindow):
 
     # --- tab management ---------------------------------------------------
 
-    def _add_tab(self, controller: AppController | None = None) -> DocumentTab:
-        """Create, wire up and activate a new document tab."""
+    def _add_tab(self, controller: AppController | None = None, *, activate: bool = True) -> DocumentTab:
+        """Create and wire up a new document tab, with no document in
+        it yet - the caller loads or builds one immediately afterward.
+
+        `activate=True` (the default) makes the new tab current right
+        away. Every real caller in this file passes `activate=False`
+        instead and activates the tab itself only once it actually has
+        a document, via `self.tab_widget.setCurrentWidget(tab)` (or an
+        explicit `_refresh()` - see below for why both are needed) -
+        see the real bug this avoids, below. `activate=True` is kept
+        as the default only for callers (e.g. tests) that don't need
+        that care.
+
+        Found and fixed here, confirmed by grab()ing the real window,
+        not just reasoned about: `setCurrentIndex` makes the tab
+        current *synchronously*, which fires `currentChanged` ->
+        `_on_current_tab_changed` -> `_refresh()` immediately - before
+        the caller has had a chance to open/build a document in it.
+        `_refresh()` at that point renders a real, capturable frame:
+        an empty "Untitled" tab with a plain dark thumbnail grid (the
+        grid's own background color, since there are zero items) and
+        "0 page(s)" in the status bar - exactly the "black, empty tab,
+        the PDF content never appears" bug report. A later explicit
+        `_refresh()` call (once the document is actually loaded)
+        overwrites this in the same call stack with no event-loop turn
+        in between, so a purely synchronous script self-heals too
+        fast to see it - but any real repaint trigger in between (a
+        slow file copy, a window-manager-driven redraw) can expose the
+        empty frame, and grab() proves it exists as a real renderable
+        state, not just a timing curiosity.
+
+        `activate=False` blocks the tab widget's signals for the
+        `addTab` call too, not just skips `setCurrentIndex` - adding
+        the very *first* tab to an empty `QTabWidget` makes Qt select
+        it automatically (confirmed directly: `addTab` alone, with no
+        `setCurrentIndex` call at all, still fires `currentChanged`),
+        so `activate=False` has to suppress that emission as well or
+        the first-tab-ever case would hit the exact same premature
+        render this exists to prevent. The tab's *actual* current-ness
+        (`tab_widget.currentIndex()`/`currentWidget()`) is unaffected
+        by blocking signals - only our own signal-driven refresh is -
+        so a caller opening the very first document still needs an
+        explicit `_refresh()` once loading succeeds: `setCurrentWidget`
+        would be a no-op there (Qt already made it current, silently,
+        during `addTab`) and wouldn't re-fire `currentChanged` on its
+        own.
+        """
         if controller is None:
             controller = AppController(self.registry, self.audit_log)
         tab = DocumentTab(controller, self.thumbnail_size)
@@ -477,8 +522,15 @@ class MainWindow(QMainWindow):
         tab.thumbnail_list.customContextMenuRequested.connect(
             lambda pos, t=tab: self._show_thumbnail_context_menu(t, pos)
         )
-        index = self.tab_widget.addTab(tab, self._tab_label(tab))
-        self.tab_widget.setCurrentIndex(index)
+        if activate:
+            index = self.tab_widget.addTab(tab, self._tab_label(tab))
+            self.tab_widget.setCurrentIndex(index)
+        else:
+            self.tab_widget.blockSignals(True)
+            try:
+                self.tab_widget.addTab(tab, self._tab_label(tab))
+            finally:
+                self.tab_widget.blockSignals(False)
         return tab
 
     def _discard_tab(self, tab: DocumentTab) -> None:
@@ -618,7 +670,10 @@ class MainWindow(QMainWindow):
                 return
             opened_new_tab = False
         else:
-            tab = self._add_tab()
+            # activate=False: don't switch to (and render) the new tab
+            # until it actually has a document - see _add_tab's
+            # docstring for the black-empty-tab bug this avoids.
+            tab = self._add_tab(activate=False)
             opened_new_tab = True
 
         try:
@@ -632,10 +687,19 @@ class MainWindow(QMainWindow):
                 # Don't strand an empty tab for a document that never
                 # opened; a replaced tab keeps its existing document,
                 # which open_document() leaves untouched on failure.
+                # It was never activated, so nothing was ever shown.
                 self._discard_tab(tab)
             self._show_error(exc)
             self._refresh()
             return
+        if opened_new_tab:
+            # Now that it actually has a document: setCurrentWidget
+            # handles activation for a second-or-later tab (firing
+            # _refresh() itself); the explicit _refresh() below is
+            # still needed for the very first tab, where Qt already
+            # silently made it current inside addTab and this is a
+            # no-op that fires no signal (see _add_tab's docstring).
+            self.tab_widget.setCurrentWidget(tab)
         self.recent_files.add(path)
         self._mark_active_session()
         self._refresh()
@@ -770,7 +834,10 @@ class MainWindow(QMainWindow):
         )
         restored = False
         if response == QMessageBox.StandardButton.Yes:
-            tab = self._add_tab()
+            # activate=False: see _add_tab's docstring - don't switch
+            # to (and render) the new tab until it actually has a
+            # document.
+            tab = self._add_tab(activate=False)
             try:
                 tab.controller.restore_from_checkpoint(
                     recovery.checkpoint_path,
@@ -778,6 +845,7 @@ class MainWindow(QMainWindow):
                     display_name=recovery.display_name,
                 )
                 restored = True
+                self.tab_widget.setCurrentWidget(tab)
             except PDFEditorError as exc:
                 self._discard_tab(tab)
                 self._show_error(exc)
@@ -850,22 +918,33 @@ class MainWindow(QMainWindow):
 
         if dialog.exec() != BaseToolDialog.DialogCode.Accepted:
             return
-        if tab is None:
+        created_tab = tab is None
+        if created_tab:
             # Merge with no tabs open: it builds a document from
             # scratch, so it gets a fresh tab - created only now that
             # the dialog was actually accepted, so a cancelled Merge
-            # can't strand an empty tab.
-            tab = self._add_tab()
+            # can't strand an empty tab. activate=False: don't switch
+            # to (and render) it until apply_operation below actually
+            # succeeds - see _add_tab's docstring for the black-empty
+            # -tab bug this avoids.
+            tab = self._add_tab(activate=False)
+        assert tab is not None  # either pre-existing (checked above) or just created
         try:
             plugin = self.registry.get(tool_id)
             operation = plugin.build_operation(**dialog.values())
             with self._busy_cursor():
                 tab.controller.apply_operation(operation)
         except PDFEditorError as exc:
+            if created_tab:
+                # Don't strand an empty tab for a Merge that built
+                # nothing (e.g. every input file was invalid).
+                self._discard_tab(tab)
             self._show_error(exc)
             return
         finally:
             self._mark_active_session()
+        if created_tab:
+            self.tab_widget.setCurrentWidget(tab)
         self._refresh()
 
     # --- workflows -------------------------------------------------------------

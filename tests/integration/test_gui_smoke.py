@@ -22,6 +22,7 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox
 
+from gui.controller import AppController
 from gui.dialogs.bates_numbering_dialog import BatesNumberingDialog
 from gui.dialogs.create_form_field_dialog import CreateFormFieldDialog
 from gui.dialogs.crop_dialog import CropDialog
@@ -58,6 +59,37 @@ def _make_pdf(path: Path, num_pages: int) -> Path:
         pdf.add_blank_page(page_size=(300, 400))
     pdf.save(path)
     return path
+
+
+def _make_colored_pdf(path: Path, num_pages: int, color: tuple[float, float, float]) -> Path:
+    """Like `_make_pdf`, but with real, distinctly-colored visible
+    content on every page (a filled rect, via fitz) - needed to tell a
+    genuinely-rendered thumbnail apart from a blank-but-technically-
+    present one by sampling actual pixel values, not just checking
+    `count() > 0` (see the black-empty-tab regression tests below)."""
+    import fitz
+
+    doc = fitz.open()
+    for _ in range(num_pages):
+        page = doc.new_page(width=300, height=400)
+        page.draw_rect(fitz.Rect(20, 20, 280, 380), color=color, fill=color)
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def _thumbnail_center_pixel(
+    tab: DocumentTab, window: MainWindow, index: int = 0
+) -> tuple[int, int, int, int]:
+    """The real rendered center-pixel color of thumbnail `index`,
+    sampled from the actual built QIcon/QPixmap - not just "an item
+    exists." A black/empty tab could still technically have a
+    QListWidgetItem with a blank or stale icon; this catches that."""
+    item = tab.thumbnail_list.item(index)
+    assert item is not None, "expected a rendered thumbnail, found none"
+    pixmap = item.icon().pixmap(window.thumbnail_size)
+    image = pixmap.toImage()
+    return image.pixelColor(image.width() // 2, image.height() // 2).getRgb()
 
 
 def _open_tab(window: MainWindow, path: Path) -> DocumentTab:
@@ -1663,6 +1695,181 @@ def test_a_failed_open_in_a_new_tab_does_not_strand_an_empty_tab(
     mock_critical.assert_called_once()
     assert window.tab_widget.count() == 1
     assert window.controller.doc.source_path == a
+    _force_close(window)
+
+
+# --- black-empty-tab regression --------------------------------------------
+#
+# Real bug, found and fixed: creating a new tab made it *current*
+# synchronously (QTabWidget.setCurrentIndex fires currentChanged
+# immediately), which rendered it - via the normal _refresh() path -
+# before the caller had actually opened/built a document in it. That
+# produced a real, capturable frame: an empty "Untitled" tab with a
+# plain dark thumbnail grid (zero items) and "0 page(s)" in the status
+# bar, confirmed by grab()ing the real window under
+# QT_QPA_PLATFORM=offscreen. The fix (see MainWindow._add_tab's
+# docstring) defers activating a new tab until it actually has a
+# document. These tests cover the root cause directly (activation is
+# deferred) and the user-visible symptom (every tab's thumbnails are
+# real, correctly-colored pixels, not a blank/stale grid), across all
+# three tab-creation paths plus repeated switching.
+
+
+def test_opening_a_new_tab_does_not_activate_it_until_its_document_is_loaded(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Root-cause regression: while a second-or-later tab's document
+    is being opened, the window must still be showing the *previous*
+    tab, not the new, as-yet-empty one."""
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 1)
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+
+    observed: list[bool] = []
+    original_open = tab_a.controller.__class__.open_document
+
+    def spying_open_document(self: Any, path: Path) -> None:
+        # Captured mid-call, before the real open_document has done
+        # anything: the window must still be showing tab_a, not a
+        # freshly-added-but-undocumented new tab.
+        observed.append(window.current_tab is tab_a)
+        original_open(self, path)
+
+    with patch.object(type(tab_a.controller), "open_document", spying_open_document):
+        window._open_document_path(b, PLACEMENT_NEW_TAB)
+
+    assert observed == [True]
+    # ...and once the document is actually loaded, the new tab (not A)
+    # is the one that's current.
+    assert window.current_tab is not tab_a
+    assert window.current_tab is not None
+    assert window.current_tab.document_name() == "b.pdf"
+    _force_close(window)
+
+
+def test_the_first_tab_ever_does_not_activate_until_its_document_is_loaded(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Same root-cause check for the very first tab (zero tabs open):
+    Qt auto-selects the first tab added to an empty QTabWidget even
+    without an explicit setCurrentIndex call (confirmed directly), so
+    this path needs its own coverage - the fix has to suppress that
+    signal too, not just skip the manual setCurrentIndex(). While the
+    document is loading, the window must still show the empty-state
+    welcome screen, not a black tab."""
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    window = MainWindow()
+    assert window.tab_widget.count() == 0
+
+    observed: list[bool] = []
+
+    def spying_open_document(self: Any, path: Path) -> None:
+        observed.append(window.stack.currentWidget() is window.empty_state)
+
+    with patch.object(AppController, "open_document", spying_open_document):
+        window._open_document_path(a, PLACEMENT_NEW_TAB)
+
+    assert observed == [True]
+    _force_close(window)
+
+
+def test_opening_a_second_tab_shows_its_own_real_page_content_by_pixel(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    a = _make_colored_pdf(tmp_path / "a.pdf", 1, (1, 0, 0))
+    b = _make_colored_pdf(tmp_path / "b.pdf", 1, (0, 1, 0))
+    window = MainWindow()
+    _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+
+    assert tab_b.thumbnail_list.count() == 1
+    assert _thumbnail_center_pixel(tab_b, window)[:3] == (0, 255, 0)
+    _force_close(window)
+
+
+def test_switching_back_to_a_backgrounded_tab_still_shows_its_real_content(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Repeated switching (per the bug report's correction - the
+    black tab might not be the newly-created one, it might be one
+    reactivated after going to the background) - every switch, both
+    directions, several times, must keep showing the real page color,
+    never a blank/black grid."""
+    a = _make_colored_pdf(tmp_path / "a.pdf", 1, (1, 0, 0))
+    b = _make_colored_pdf(tmp_path / "b.pdf", 1, (0, 1, 0))
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+
+    for _ in range(5):
+        window.tab_widget.setCurrentWidget(tab_a)
+        assert tab_a.thumbnail_list.count() == 1
+        assert _thumbnail_center_pixel(tab_a, window)[:3] == (255, 0, 0)
+        window.tab_widget.setCurrentWidget(tab_b)
+        assert tab_b.thumbnail_list.count() == 1
+        assert _thumbnail_center_pixel(tab_b, window)[:3] == (0, 255, 0)
+    _force_close(window)
+
+
+def test_a_third_tab_and_switching_out_of_order_keeps_each_tabs_content_correct(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    a = _make_colored_pdf(tmp_path / "a.pdf", 1, (1, 0, 0))
+    b = _make_colored_pdf(tmp_path / "b.pdf", 1, (0, 1, 0))
+    c = _make_colored_pdf(tmp_path / "c.pdf", 1, (0, 0, 1))
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    tab_b = _open_tab(window, b)
+    tab_c = _open_tab(window, c)
+
+    for tab, expected in [(tab_a, (255, 0, 0)), (tab_c, (0, 0, 255)), (tab_b, (0, 255, 0))]:
+        window.tab_widget.setCurrentWidget(tab)
+        assert _thumbnail_center_pixel(tab, window)[:3] == expected
+    _force_close(window)
+
+
+def test_replacing_the_current_tab_shows_the_new_documents_real_content(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    a = _make_colored_pdf(tmp_path / "a.pdf", 1, (1, 0, 0))
+    b = _make_colored_pdf(tmp_path / "b.pdf", 1, (0, 0, 1))
+    window = MainWindow()
+    _open_tab(window, a)
+
+    window._open_document_path(b, PLACEMENT_REPLACE_CURRENT)
+
+    assert window.tab_widget.count() == 1
+    tab = window.current_tab
+    assert tab is not None
+    assert _thumbnail_center_pixel(tab, window)[:3] == (0, 0, 255)
+    _force_close(window)
+
+
+def test_a_merge_that_fails_to_build_does_not_strand_an_empty_tab(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Merge with no document open gets its tab created only once the
+    dialog is accepted (existing behavior for a *cancelled* dialog) -
+    this covers the related gap found while fixing the black-tab bug:
+    an *accepted* dialog whose build then fails (a missing input file)
+    must not leave an empty, permanently-blank tab behind either."""
+    window = MainWindow()
+    assert window.tab_widget.count() == 0
+
+    def fake_exec(self: MergeDialog) -> QDialog.DialogCode:
+        self.file_list.addItems([str(tmp_path / "does-not-exist.pdf")])
+        return QDialog.DialogCode.Accepted
+
+    with (
+        patch.object(MergeDialog, "exec", fake_exec),
+        patch.object(QMessageBox, "critical") as mock_critical,
+    ):
+        window._run_tool("merge", MergeDialog)
+
+    mock_critical.assert_called_once()
+    assert window.tab_widget.count() == 0
+    assert window.current_tab is None
     _force_close(window)
 
 
