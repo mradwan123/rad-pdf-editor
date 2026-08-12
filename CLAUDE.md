@@ -1484,3 +1484,184 @@ shipped as a test). The pre-existing 25%-ratio tests are untouched.
 
 Full suite: **444 passed** (403 baseline + 41 new), `ruff check .`
 clean, `mypy core cli gui` clean.
+
+## Interactive signature placement (Sign) — done
+
+`SignDialog` (`gui/dialogs/sign_dialog.py`) no longer requires typing
+four raw numbers to say where a signature image goes: it now shows the
+**real target page, rendered, with the chosen image draggable and
+corner-resizable on top of it**. Scoped deliberately to Sign only -
+Watermark, Header/Footer and Create Forms share the same
+rect-placement shape and could reuse this, but were left untouched
+(see "Reusability" below).
+
+**Manual numeric entry was kept, not replaced** - a deliberate
+decision, for three separate reasons, any one of which would have been
+enough:
+
+1. The Workflow builder constructs every tool dialog against *no
+   document at all* (`TOOL_DIALOGS[tool_id](parent)`), so there is
+   nothing to preview and nothing to drag on. Removing the spin boxes
+   would have made `sign` unconfigurable as a workflow step.
+2. Typing an exact value is genuinely better than dragging when you
+   already know the coordinates (a house style, a template, a rect
+   copied from another document).
+3. They double as the canvas's live read-out - the numbers move while
+   you drag, which is how you find out what a drag actually produced.
+
+So the two inputs are two-way bound: a drag writes into the spin
+boxes, editing a spin box moves the overlay, and `values()` always
+reads the spin boxes. One source of truth for the rect regardless of
+how it was set, and `build_operation(**values)` receives the identical
+shape it always has. **`SignOperation` was not touched at all** - not
+its signature, not its bottom-left-origin rect convention, not its
+internal fitz conversion. The dialog's whole job is to produce the
+same tuple a user would have typed.
+
+**Wiring**: `MainWindow._run_tool` special-cases `"sign"` to pass the
+open document's working path, exactly the way it already special-cases
+`"fill_form"` (whose dialog needs the document's AcroForm field
+names). `SignDialog.__init__` takes that path as an *optional* second
+argument, so the plain `(parent)` call every other caller makes still
+works and silently degrades to numeric-only. A document that fails to
+render degrades the same way rather than blocking the tool.
+
+### The interaction mechanism
+
+`gui/placement_canvas.py` (new, ~330 lines) is a `QGraphicsView` +
+`QGraphicsScene` holding two items: a non-interactive
+`QGraphicsPixmapItem` of the rendered page, and a `PlacementItem`
+(a hand-written `QGraphicsItem`) for the overlay. Rendering is the
+project's existing QtPdf path - `QPdfDocument.render()`, including the
+white-backdrop compositing `MainWindow._render_thumbnails` already
+documents (QtPdf leaves unpainted areas fully transparent, so a blank
+page would otherwise read as nothing at all). No second rasterisation
+mechanism was introduced.
+
+`PlacementItem` does its own mouse handling rather than leaning on
+`ItemIsMovable`, because the flag only moves - it cannot resize:
+`mousePressEvent` hit-tests the four corner handles *first* and falls
+back to the body, `mouseMoveEvent` applies the delta from the
+press-time rect (not incrementally, so a drag can't accumulate
+rounding), `mouseReleaseEvent` clears the mode. Both operations are
+clamped to the page: a body drag slides along the edge instead of
+leaving the page, and a handle drag is clamped to `_MIN_SIZE` from the
+opposite edge, so the canvas can never produce the degenerate
+`x1 <= x0` rect `SignOperation` rejects.
+
+**One deliberate deviation from the usual Qt idiom**: the item's
+`pos()` is pinned at scene (0, 0) forever and the rectangle is stored
+in *scene* coordinates, instead of moving `pos()` around a
+local-origin rect. Item-local and scene coordinates are then always
+identical, which removes a whole category of "applied the delta in the
+wrong frame" bug from the drag code and means the rect conversion
+never has to `mapToScene` anything. The cost is a `boundingRect()`
+that sits far from the item's origin, which Qt handles fine.
+
+The view `fitInView`s the whole page on resize, so the *widget's* size
+never enters the maths - conversion is only ever between PDF points
+and scene pixels. Resizing the dialog cannot move a placement.
+
+### Coordinate conversion, worked through
+
+Page pixels: the page's long edge is rendered to `_TARGET_LONG_EDGE`
+= 800 scene px (a thumbnail is 120x160 - too small to place anything
+precisely). For the 300x400 pt fixture page that is exactly scale 2.0,
+scene 600x800.
+
+Scene is top-left-origin with y growing *down*; PDF is
+bottom-left-origin with y growing *up*. So the on-screen **top** edge
+becomes **y1** and the on-screen **bottom** edge becomes **y0** -
+which is precisely the swap a naive `y0 = height - top` conversion
+gets backwards. For an overlay at scene (100, 120) sized 200x80:
+
+    x0 = 100 / 2                =  50
+    x1 = (100 + 200) / 2        = 150
+    y1 = 400 - (120 / 2)        = 340   <- screen top
+    y0 = 400 - ((120 + 80) / 2) = 300   <- screen bottom
+
+giving `(50, 300, 150, 340)`. Confirmed against the live widget, then
+pinned as an exact assertion (`test_scene_rect_converts_to_the_exact_
+bottom_left_origin_pdf_rect`), with the inverse
+(`set_pdf_rect` → the same scene rect) asserted separately so the two
+conversions are proven to be genuine inverses rather than
+individually plausible. `test_a_rect_at_the_page_origin_maps_to_the_
+bottom_left_corner` pins the flip itself: PDF (0, 0) must land at
+scene y = 800, the *bottom* of the page.
+
+End-to-end, not just in isolation: applying the resulting
+`SignOperation` to a real fixture and asking `fitz` where the image
+went returns bbox `(50, 60, 150, 100)` - the same rect flipped into
+fitz's own top-left frame on a 400 pt page, exactly as predicted
+(`test_sign_dragged_on_the_canvas_lands_where_it_was_dropped`,
+`tests/integration/test_gui_smoke.py`, driving the real `MainWindow`
+through `_run_tool`).
+
+### A real PyMuPDF quirk found while making the preview honest
+
+The preview is only worth having if it shows what the file will
+actually contain, so "does `insert_image` stretch or fit?" had to be
+answered against the real library rather than its docstring. It fits:
+`keep_proportion=True` is the default and a 200x80 image dropped into
+a 100x100 pt rect really does render as 100x40, centred - so the
+canvas letterboxes the same way.
+
+**Except for exactly-square images, where PyMuPDF 1.28.2 ignores its
+own `keep_proportion` default entirely.** A 100x100 px image in a
+100x40 pt rect fills the whole rect, distorted - and passing
+`keep_proportion=True` *explicitly* changes nothing, nor does passing
+`False`. A 101x100 px image in the identical rect is correctly fitted
+to 40.4x40. Found by measuring the blue-pixel bounding box in the
+rasterised output page, not by trusting `get_image_info`'s reported
+bbox (which reports the placement rect, and would have hidden it), and
+characterised across square/near-square/wide/tall images before being
+believed.
+
+`PlacementItem._stretches_to_fill()` mirrors the quirk rather than
+papering over it: if a user's signature is going to come out
+stretched, the preview should show it stretched instead of quietly
+disagreeing with the file it produces. `PagePlacementCanvas.image_pdf_
+rect()` exposes where the *image* (as opposed to the placement box
+around it) will land, and `test_the_preview_predicts_where_the_image_
+really_lands` asserts that prediction against a real applied
+`SignOperation`'s actual fitz bbox - parametrised over both the fitted
+and the stretched case. If a future PyMuPDF fixes the quirk, that test
+fails and names the reason.
+
+### Testing note: driving a QGraphicsItem drag headlessly
+
+Real mouse drags aren't reliably simulatable under
+`QT_QPA_PLATFORM=offscreen` - already documented twice here (the
+thumbnail-reorder test calls `model().moveRow(...)`, the tab-reorder
+test calls `QTabBar.moveTab(...)`). The equivalent for a graphics item
+is that **`QGraphicsSceneMouseEvent` is directly constructible in
+PySide6** (`setPos`/`setScenePos`/`setButton`), so the tests build real
+event objects and hand them to the item's own
+`mousePressEvent`/`mouseMoveEvent`/`mouseReleaseEvent`. That exercises
+the genuine handlers - hit-testing a corner handle over the body it
+overlaps, the press-time-rect delta maths, the page clamping - rather
+than a hand-rolled substitute for them, and without a pointer.
+
+`tests/unit/test_sign_placement_canvas.py` (16 tests): the scale the
+rest of the maths depends on, the exact hand-computed round trip and
+its inverse, the origin flip, body drag, corner-handle resize, a press
+outside the box grabbing nothing, both clamps (can't leave the page,
+can't invert the rect), the WYSIWYG prediction vs. real output, and
+the dialog wiring - canvas absent without a document, spin boxes
+following a drag, a typed value moving the overlay without feeding
+back into itself, a page change keeping the placement, and the default
+rect being clamped on a page smaller than it.
+
+### Reusability (noted, not implemented)
+
+`PagePlacementCanvas` takes a PDF path, a page number and a pixmap and
+returns a bottom-left-origin rect - nothing about it is Sign-specific,
+and `WatermarkOperation`/`HeaderFooterOperation`/
+`CreateFormFieldOperation` all take a rect in the same convention.
+Watermark and Create Forms could reuse it as-is (a text watermark
+would want a text-rendering overlay rather than a pixmap one, which is
+a `PlacementItem` paint change, not a coordinate change). Deliberately
+left for a separate change rather than done speculatively here.
+
+Full suite: **420 passed** (403 baseline + 17 new), `ruff check .`
+clean, `mypy core cli gui` clean.

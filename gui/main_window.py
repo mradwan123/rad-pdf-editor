@@ -57,6 +57,7 @@ from gui.controller import AppController
 from gui.dialogs.base_tool_dialog import BaseToolDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
 from gui.dialogs.run_workflow_dialog import RunWorkflowDialog
+from gui.dialogs.sign_dialog import SignDialog
 from gui.dialogs.tab_placement_dialog import (
     PLACEMENT_NEW_TAB,
     PLACEMENT_REPLACE_CURRENT,
@@ -834,6 +835,16 @@ class MainWindow(QMainWindow):
             working_path = tab.controller.doc.working_path
             assert working_path is not None
             dialog: BaseToolDialog = FillFormDialog(list_form_field_names(working_path), self)
+        elif tool_id == "sign":
+            # Like fill_form, SignDialog can do more when it knows which
+            # document is being edited: given the working path it shows
+            # the real page and lets the image be placed by mouse. It
+            # still works without one (the Workflow builder builds it
+            # that way), falling back to numeric entry only.
+            assert tab is not None  # guaranteed by the check above
+            working_path = tab.controller.doc.working_path
+            assert working_path is not None
+            dialog = SignDialog(self, working_path)
         else:
             dialog = dialog_cls(self)
 

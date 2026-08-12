@@ -84,6 +84,13 @@ TOOL_DIALOGS: dict[str, DialogFactory] = {
     "bates_numbering": BatesNumberingDialog,
     "flatten": FlattenDialog,
     "remove_annotations": RemoveAnnotationsDialog,
+    # SignDialog's __init__ takes an optional second argument, the
+    # working path of the document being signed - given one it shows an
+    # interactive placement canvas instead of numbers alone. Called
+    # through this factory (Workflow builder: no live document) it gets
+    # only a parent and stays numeric-only, which is exactly right for
+    # configuring a step against no particular file. MainWindow._run_tool
+    # special-cases "sign" to pass the path when there is one.
     "sign": SignDialog,
     "create_form_field": CreateFormFieldDialog,
     # FillFormDialog's __init__ takes (field_names, parent), not just

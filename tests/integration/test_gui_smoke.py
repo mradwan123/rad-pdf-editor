@@ -440,6 +440,60 @@ def test_sign_via_tools_menu_places_image(qapp: QApplication, tmp_path: Path) ->
     _force_close(window)
 
 
+def test_sign_dragged_on_the_canvas_lands_where_it_was_dropped(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """End-to-end for the interactive placement canvas: position the
+    overlay on the rendered page by moving the real graphics item (a
+    genuine mouse drag isn't simulatable offscreen - same reason
+    test_dragging_a_thumbnail_reorders_the_document calls moveRow), let
+    the dialog convert it, and check with fitz where the image actually
+    ended up in the output PDF.
+
+    The fixture page is 300x400 pt and the canvas renders its long edge
+    to 800 px, so the scale is 2.0. An overlay at scene (100, 120)
+    sized 200x80 px is therefore PDF rect (50, 300, 150, 340) measured
+    from the bottom-left - which fitz, whose own Rect is top-left
+    origin, reports back as bbox (50, 60, 150, 100) on a 400 pt page.
+    """
+    import fitz
+    from PIL import Image, ImageDraw
+    from PySide6.QtCore import QRectF
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    sig = tmp_path / "sig.png"
+    # 200x80, the same 2.5 aspect ratio as the 100x40 pt target rect -
+    # fitz's insert_image keeps proportion, so an image of a different
+    # shape would legitimately be letterboxed inside the rect and the
+    # bbox check below would be about the aspect fit, not the placement.
+    img = Image.new("RGB", (200, 80), (255, 255, 255))
+    ImageDraw.Draw(img).line((10, 60, 190, 20), fill=(0, 0, 200), width=6)
+    img.save(sig)
+
+    window = MainWindow()
+    _open_tab(window, src)
+
+    def fake_sign(self: SignDialog) -> QDialog.DialogCode:
+        assert self.canvas is not None, "the canvas needs the open document's path"
+        self.set_image_path(sig)
+        item = self.canvas.placement_item()
+        assert item is not None
+        item.set_rect(QRectF(100, 120, 200, 80))
+        self.canvas.rect_changed.emit()
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(SignDialog, "exec", fake_sign):
+        window._run_tool("sign", SignDialog)
+
+    working = window.controller.doc.working_path
+    assert working is not None
+    with fitz.open(working) as pdf:
+        images = pdf[0].get_image_info()
+        assert len(images) == 1
+        assert images[0]["bbox"] == pytest.approx((50.0, 60.0, 150.0, 100.0))
+    _force_close(window)
+
+
 def test_create_form_field_via_tools_menu_adds_a_text_field(
     qapp: QApplication, tmp_path: Path
 ) -> None:
