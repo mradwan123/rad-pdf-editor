@@ -1783,3 +1783,154 @@ verified, still correct and unchanged by this fix).
 
 Full suite: **470 passed** (463 baseline + 7 new), `ruff check .`
 clean, `mypy core cli gui` clean.
+
+## CI investigation: all 22 runs failed - root cause not confirmed, two leading theories ruled out (open item)
+
+Every run of `.github/workflows/ci.yml` on GitHub, from run #1 (commit
+`3824a5d`) through run #22 (this worktree's own HEAD, `c16652e`), has
+failed - confirmed via the public, unauthenticated REST API (`GET
+/repos/mradwan123/rad-pdf-editor/actions/runs`), not assumed. The
+pattern is consistent across every completed run checked: `test
+(ubuntu-latest, 3.11)` and `test (windows-latest, 3.11)` both fail at
+the `Test (pytest)` step specifically (`ruff`/`mypy`/install all
+succeed first) with **"Process completed with exit code 2"** (read
+directly from the check-run's annotation), while `test
+(macos-latest, 3.11)` succeeds, every time. Raw job logs are not
+retrievable - `GET .../actions/jobs/{id}/logs` 403s with "Must have
+admin rights to Repository" even for this public repo with no auth
+used for the calls that do work, and the job's own HTML page is a
+client-side-rendered SPA shell with zero log text in the initial
+response (confirmed by fetching it directly) - so this investigation
+had no access to the actual pytest traceback and worked entirely from
+local reproduction.
+
+**What "exit code 2" actually means was confirmed by hand, not
+assumed**: `pytest`'s own exit codes are `0` all passed, `1` some
+tests failed, `2` interrupted (this includes collection errors), `3`
+internal error, `4` usage error, `5` no tests collected. Built two
+throwaway repros to pin this down for *this* pytest version (9.1.1):
+a test file with a broken top-level `import nonexistent_module_xyz`
+exits **2** ("Interrupted: 1 error during collection"); a test whose
+*fixture* raises at setup time exits **1** (a normal test failure, not
+a collection interruption). So the CI failure is almost certainly a
+**collection-time** import/syntax error in some test module (or
+something it imports), on Linux and Windows specifically - not an
+assertion failure, and not (per the second repro) a crash inside a
+fixture like `QApplication()` construction, which happens at test
+*setup* time in this suite, not collection time.
+
+**Local reproduction, done properly, not loosely**: no `python3.11`
+was installed on this dev machine (only `3.12`), so `pip install
+--user uv` + `uv python install 3.11` fetched a real
+`cpython-3.11.15` build (confirmed working, matching CI's pinned
+`python-version: "3.11"` exactly) rather than testing under `3.12` and
+hoping it generalizes. A restricted `PATH` was built by symlinking
+every `/usr/bin` entry *except* `tesseract`/`soffice`/`libreoffice`/`gs`
+into a scratch dir - confirmed via `shutil.which` that all three
+report `None` under it - to simulate a bare runner lacking the
+optional binaries CLAUDE.md documents as hand-installed on this
+machine during Phases 3/4. `pip install -e ".[dev]"` under this
+Python 3.11 + restricted-PATH combination pulled real, current PyPI
+packages (confirmed network access exists in this sandbox for pip,
+separate from the app's own runtime `network_lockdown()` -
+`ocrmypdf==17.10.0`, `PySide6==6.11.1`, etc., all newer than this
+worktree's unpinned `>=` floors).
+
+**Two of the task's explicitly-flagged candidate theories were tested
+directly and are false, not just unlikely:**
+
+1. **"A `skipif` guard is broken, so a missing optional binary breaks
+   a test instead of skipping it."** Ran the *exact* CI sequence
+   (`ruff check .` clean, `mypy core cli gui` clean, `QT_QPA_PLATFORM=offscreen
+   pytest` under Python 3.11.15) with `tesseract`/`soffice`/`gs` all
+   hidden from `PATH`: **454 passed, 9 skipped, 0 failed** - the exact
+   9 skips CLAUDE.md's Phase 3/4 sections predict
+   (`tesseract_available()`/`libreoffice_binary()`/Ghostscript-guarded
+   tests). Then re-ran with a *real* `gs` added back to the restricted
+   `PATH` (still no `tesseract`/`soffice`, since GH's runner-image docs
+   for Ubuntu 24.04 list none of the three as preinstalled software -
+   checked directly, not assumed) to test the real Ghostscript-repair
+   path end to end rather than just its mock: **455 passed, 8
+   skipped**, `test_repair_falls_back_to_ghostscript_for_severe_corruption`
+   included and green against the actual binary. Every `skipif` guard
+   grepped across `tests/` (`tests/unit/test_repair.py`'s
+   `_ghostscript_binary`, `test_convert_common.py`/`test_convert_to.py`'s
+   `libreoffice_binary`, `test_ocr_scan.py`'s `tesseract_available`) is
+   logically correct - none inverted, none checking the wrong thing.
+2. **"The Python-3.12-only PEP 695 syntax in `tifffile` (already
+   documented above as an active `mypy`-time problem for this
+   project) is *also* a runtime problem on CI's pinned Python 3.11."**
+   Grepped the actually-resolved `tifffile` source directly and
+   confirmed the hazard is real in isolation - `tifffile.py` has
+   unconditional (not `TYPE_CHECKING`-guarded) module-level statements
+   like `type ByteOrder = Literal['>', '<']` and imports
+   `typing.override`, both 3.12+-only - but then confirmed by tracing
+   `sys.modules` before/after `import deskew` that this scikit-image
+   version's actual import graph (`skimage.color`/`.feature`/`.transform`,
+   the only submodules `core/ops/ocr_scan.py` touches) **never reaches
+   `tifffile` at runtime**, only in mypy's static, laziness-blind
+   import-following - consistent with the existing CLAUDE.md note that
+   this is a `mypy`-only problem. Ran the full suite for real under the
+   genuine Python 3.11.15 build described above and got the same 454
+   passed/9 skipped with zero collection errors - if this were live on
+   CI's Python 3.11, it would have reproduced here identically, since
+   nothing about it is OS-specific.
+
+**Also checked and ruled out**: stray uncommitted/gitignored fixture
+files masking a fresh-checkout failure (`git status` is clean in this
+worktree and `.gitignore` excludes nothing test-relevant - fixtures
+are generated at runtime, not checked in, confirmed via `git ls-files
+tests/fixtures` returning only `.gitkeep`); an inverted
+`sys.platform`/`os.name` condition silently running a Windows- or
+Linux-only-broken test on the wrong OS (grepped every platform check
+in `core/`/`gui/`/`cli/`/`tests/` - the only hits are
+`core/logging_config.py`'s three-way `app_data_dir()` branch, not a
+test skip); a pip dependency resolver picking different transitive
+package versions per OS (compared real resolved wheel manifests for
+`manylinux_2_34_x86_64` vs `win_amd64` targets via `pip install
+--platform ... --target ...` - `tifffile`, `scipy`, `numpy`, `PySide6`
+all matched between the two, so no OS-specific version-skew was found
+for the packages checked, though this comparison method turned out too
+fragile to fully trust - see caveat below).
+
+**What remains genuinely unresolved, and why it wasn't shipped as a
+fix**: the leading remaining hypothesis, well-documented in the wider
+PySide6/Qt community (not this project's own speculation) but **not
+confirmed against this project's actual CI failure**, is that the Qt
+`offscreen` platform plugin's native shared-library dependency chain -
+confirmed via `ldd` on the real `libqoffscreen.so` to include `libGL`,
+`libEGL`, `libxkbcommon`, `libX11`, `libfontconfig`, `libdbus-1`, and
+~15 more - can fail to initialize on a GPU-less Linux/Windows CI VM if
+any aren't present or the software-rendering fallback isn't correctly
+selected, while macOS's Qt build uses a self-contained, OS-native
+Cocoa/Core Graphics path that doesn't hit this class of problem. This
+is consistent with the Linux-and-Windows-fail-but-not-macOS split and
+is a widely-reported real-world PySide6-on-CI pitfall (multiple
+independent reports found and read, cited in the investigation, not
+just one blog post). **It could not be verified**: this dev machine
+already has every one of those shared libraries installed from normal
+desktop use, so `libqoffscreen.so` loads and a real `QApplication`
+constructs cleanly here (`app.platformName()` returns `"offscreen"`
+with no warnings) regardless of `PATH` restriction - there was no
+`docker`/`podman` available in this sandbox to build a genuinely bare
+Ubuntu container to test against, no `sudo`/apt access to remove
+system libraries and test the negative case, and no Windows machine at
+all to test that leg. Per this task's explicit instruction not to ship
+an unverified fix, `.github/workflows/ci.yml` was **not modified** -
+an `apt-get install libegl1 libxkbcommon0 ...` style change would be
+the standard community-recommended remedy for the Linux leg
+specifically, but adding it here would be guessing at a config change
+this investigation could not prove would fix the real failure, and
+would not address a Windows leg that has no analogous apt-based fix
+at all. This is the honest state to hand to a human for either (a)
+temporarily granting job-log read access to get the real traceback, or
+(b) trying the `apt-get`-based Linux mitigation directly against a
+real GH Actions run, which this sandboxed environment cannot do.
+
+Local verification performed instead (since the actual bug could not
+be reproduced, there was nothing broken to fix): full suite run twice
+in the *normal*, unrestricted environment (this machine's regular
+Python 3.12, `tesseract`/`soffice`/`gs` all on `PATH`) - **463 passed,
+0 skipped**, `ruff check .` clean, `mypy core cli gui` clean - matching
+the documented 463-test baseline exactly, confirming this investigation
+made no source changes and left the suite exactly as it found it.
