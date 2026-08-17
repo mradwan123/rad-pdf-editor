@@ -916,36 +916,47 @@ class MainWindow(QMainWindow):
         else:
             dialog = dialog_cls(self)
 
-        if dialog.exec() != BaseToolDialog.DialogCode.Accepted:
-            return
-        created_tab = tab is None
-        if created_tab:
-            # Merge with no tabs open: it builds a document from
-            # scratch, so it gets a fresh tab - created only now that
-            # the dialog was actually accepted, so a cancelled Merge
-            # can't strand an empty tab. activate=False: don't switch
-            # to (and render) it until apply_operation below actually
-            # succeeds - see _add_tab's docstring for the black-empty
-            # -tab bug this avoids.
-            tab = self._add_tab(activate=False)
-        assert tab is not None  # either pre-existing (checked above) or just created
+        # A dialog can hold an OS handle on a file in the session temp
+        # dir (SignDialog's placement canvas keeps the working copy
+        # open through a QPdfDocument), and every dialog here is
+        # parented to this window, so it outlives exec() by however
+        # long Qt takes to destroy it - potentially past the point
+        # close_session() securely wipes that dir, which Windows then
+        # refuses to do (WinError 32). Released deterministically here,
+        # on every path out, rather than left to destruction order.
         try:
-            plugin = self.registry.get(tool_id)
-            operation = plugin.build_operation(**dialog.values())
-            with self._busy_cursor():
-                tab.controller.apply_operation(operation)
-        except PDFEditorError as exc:
+            if dialog.exec() != BaseToolDialog.DialogCode.Accepted:
+                return
+            created_tab = tab is None
             if created_tab:
-                # Don't strand an empty tab for a Merge that built
-                # nothing (e.g. every input file was invalid).
-                self._discard_tab(tab)
-            self._show_error(exc)
-            return
+                # Merge with no tabs open: it builds a document from
+                # scratch, so it gets a fresh tab - created only now
+                # that the dialog was actually accepted, so a cancelled
+                # Merge can't strand an empty tab. activate=False:
+                # don't switch to (and render) it until apply_operation
+                # below actually succeeds - see _add_tab's docstring
+                # for the black-empty-tab bug this avoids.
+                tab = self._add_tab(activate=False)
+            assert tab is not None  # either pre-existing (checked above) or just created
+            try:
+                plugin = self.registry.get(tool_id)
+                operation = plugin.build_operation(**dialog.values())
+                with self._busy_cursor():
+                    tab.controller.apply_operation(operation)
+            except PDFEditorError as exc:
+                if created_tab:
+                    # Don't strand an empty tab for a Merge that built
+                    # nothing (e.g. every input file was invalid).
+                    self._discard_tab(tab)
+                self._show_error(exc)
+                return
+            finally:
+                self._mark_active_session()
+            if created_tab:
+                self.tab_widget.setCurrentWidget(tab)
+            self._refresh()
         finally:
-            self._mark_active_session()
-        if created_tab:
-            self.tab_widget.setCurrentWidget(tab)
-        self._refresh()
+            dialog.release_resources()
 
     # --- workflows -------------------------------------------------------------
 

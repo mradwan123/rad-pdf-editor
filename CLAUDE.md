@@ -1784,153 +1784,202 @@ verified, still correct and unchanged by this fix).
 Full suite: **470 passed** (463 baseline + 7 new), `ruff check .`
 clean, `mypy core cli gui` clean.
 
-## CI investigation: all 22 runs failed - root cause not confirmed, two leading theories ruled out (open item)
+## CI: all runs failed - three distinct root causes, all now fixed (real logs obtained)
 
-Every run of `.github/workflows/ci.yml` on GitHub, from run #1 (commit
-`3824a5d`) through run #22 (this worktree's own HEAD, `c16652e`), has
-failed - confirmed via the public, unauthenticated REST API (`GET
-/repos/mradwan123/rad-pdf-editor/actions/runs`), not assumed. The
-pattern is consistent across every completed run checked: `test
-(ubuntu-latest, 3.11)` and `test (windows-latest, 3.11)` both fail at
-the `Test (pytest)` step specifically (`ruff`/`mypy`/install all
-succeed first) with **"Process completed with exit code 2"** (read
-directly from the check-run's annotation), while `test
-(macos-latest, 3.11)` succeeds, every time. Raw job logs are not
-retrievable - `GET .../actions/jobs/{id}/logs` 403s with "Must have
-admin rights to Repository" even for this public repo with no auth
-used for the calls that do work, and the job's own HTML page is a
-client-side-rendered SPA shell with zero log text in the initial
-response (confirmed by fetching it directly) - so this investigation
-had no access to the actual pytest traceback and worked entirely from
-local reproduction.
+The previous entry here recorded an investigation that could not read
+the job logs (`GET .../actions/jobs/{id}/logs` 403'd without admin
+rights) and therefore could not confirm a cause. `gh` is authenticated
+now, the logs from run `31582525113` were read directly, and they
+settle it: **the earlier investigation's leading hypothesis was right
+for Linux, and its assumption that Windows failed the same way was
+wrong.** Windows failed for two entirely unrelated reasons, one of
+them a genuine product bug. macOS passed cleanly all along.
 
-**What "exit code 2" actually means was confirmed by hand, not
-assumed**: `pytest`'s own exit codes are `0` all passed, `1` some
-tests failed, `2` interrupted (this includes collection errors), `3`
-internal error, `4` usage error, `5` no tests collected. Built two
-throwaway repros to pin this down for *this* pytest version (9.1.1):
-a test file with a broken top-level `import nonexistent_module_xyz`
-exits **2** ("Interrupted: 1 error during collection"); a test whose
-*fixture* raises at setup time exits **1** (a normal test failure, not
-a collection interruption). So the CI failure is almost certainly a
-**collection-time** import/syntax error in some test module (or
-something it imports), on Linux and Windows specifically - not an
-assertion failure, and not (per the second repro) a crash inside a
-fixture like `QApplication()` construction, which happens at test
-*setup* time in this suite, not collection time.
+Keeping the earlier entry's correct groundwork, since it saved time
+here and is still true: pytest exit code 2 does mean a *collection*
+error (verified by repro, not assumed), so the Linux failure was never
+an assertion failure; and the `skipif`-guard and `tifffile`/PEP-695
+theories really were dead ends, ruled out by local reproduction under
+a genuine Python 3.11 build with the optional binaries hidden.
 
-**Local reproduction, done properly, not loosely**: no `python3.11`
-was installed on this dev machine (only `3.12`), so `pip install
---user uv` + `uv python install 3.11` fetched a real
-`cpython-3.11.15` build (confirmed working, matching CI's pinned
-`python-version: "3.11"` exactly) rather than testing under `3.12` and
-hoping it generalizes. A restricted `PATH` was built by symlinking
-every `/usr/bin` entry *except* `tesseract`/`soffice`/`libreoffice`/`gs`
-into a scratch dir - confirmed via `shutil.which` that all three
-report `None` under it - to simulate a bare runner lacking the
-optional binaries CLAUDE.md documents as hand-installed on this
-machine during Phases 3/4. `pip install -e ".[dev]"` under this
-Python 3.11 + restricted-PATH combination pulled real, current PyPI
-packages (confirmed network access exists in this sandbox for pip,
-separate from the app's own runtime `network_lockdown()` -
-`ocrmypdf==17.10.0`, `PySide6==6.11.1`, etc., all newer than this
-worktree's unpinned `>=` floors).
+### Linux: PySide6's native library dependencies aren't on the runner
 
-**Two of the task's explicitly-flagged candidate theories were tested
-directly and are false, not just unlikely:**
+```
+ImportError while importing test module '.../tests/integration/test_gui_smoke.py'
+tests/integration/test_gui_smoke.py:21: in <module>
+    from PySide6.QtGui import QCloseEvent
+E   ImportError: libEGL.so.1: cannot open shared object file: No such file or directory
+```
 
-1. **"A `skipif` guard is broken, so a missing optional binary breaks
-   a test instead of skipping it."** Ran the *exact* CI sequence
-   (`ruff check .` clean, `mypy core cli gui` clean, `QT_QPA_PLATFORM=offscreen
-   pytest` under Python 3.11.15) with `tesseract`/`soffice`/`gs` all
-   hidden from `PATH`: **454 passed, 9 skipped, 0 failed** - the exact
-   9 skips CLAUDE.md's Phase 3/4 sections predict
-   (`tesseract_available()`/`libreoffice_binary()`/Ghostscript-guarded
-   tests). Then re-ran with a *real* `gs` added back to the restricted
-   `PATH` (still no `tesseract`/`soffice`, since GH's runner-image docs
-   for Ubuntu 24.04 list none of the three as preinstalled software -
-   checked directly, not assumed) to test the real Ghostscript-repair
-   path end to end rather than just its mock: **455 passed, 8
-   skipped**, `test_repair_falls_back_to_ghostscript_for_severe_corruption`
-   included and green against the actual binary. Every `skipif` guard
-   grepped across `tests/` (`tests/unit/test_repair.py`'s
-   `_ghostscript_binary`, `test_convert_common.py`/`test_convert_to.py`'s
-   `libreoffice_binary`, `test_ocr_scan.py`'s `tesseract_available`) is
-   logically correct - none inverted, none checking the wrong thing.
-2. **"The Python-3.12-only PEP 695 syntax in `tifffile` (already
-   documented above as an active `mypy`-time problem for this
-   project) is *also* a runtime problem on CI's pinned Python 3.11."**
-   Grepped the actually-resolved `tifffile` source directly and
-   confirmed the hazard is real in isolation - `tifffile.py` has
-   unconditional (not `TYPE_CHECKING`-guarded) module-level statements
-   like `type ByteOrder = Literal['>', '<']` and imports
-   `typing.override`, both 3.12+-only - but then confirmed by tracing
-   `sys.modules` before/after `import deskew` that this scikit-image
-   version's actual import graph (`skimage.color`/`.feature`/`.transform`,
-   the only submodules `core/ops/ocr_scan.py` touches) **never reaches
-   `tifffile` at runtime**, only in mypy's static, laziness-blind
-   import-following - consistent with the existing CLAUDE.md note that
-   this is a `mypy`-only problem. Ran the full suite for real under the
-   genuine Python 3.11.15 build described above and got the same 454
-   passed/9 skipped with zero collection errors - if this were live on
-   CI's Python 3.11, it would have reproduced here identically, since
-   nothing about it is OS-specific.
+Identical for all four GUI-importing test modules
+(`test_gui_smoke.py`, `test_dialog_sizing.py`, `test_gui_resources.py`,
+`test_sign_placement_canvas.py`), hence `Interrupted: 4 errors during
+collection` / exit code 2. This is exactly the community-known
+PySide6-on-bare-Ubuntu problem the previous investigation identified as
+its leading theory but declined to ship a fix for without evidence -
+the right call at the time, and the evidence has now arrived. It also
+explains why *every* run since #1 failed: `test_gui_resources.py` has
+existed since the branding commit, so the Linux leg has never once got
+past collection.
 
-**Also checked and ruled out**: stray uncommitted/gitignored fixture
-files masking a fresh-checkout failure (`git status` is clean in this
-worktree and `.gitignore` excludes nothing test-relevant - fixtures
-are generated at runtime, not checked in, confirmed via `git ls-files
-tests/fixtures` returning only `.gitkeep`); an inverted
-`sys.platform`/`os.name` condition silently running a Windows- or
-Linux-only-broken test on the wrong OS (grepped every platform check
-in `core/`/`gui/`/`cli/`/`tests/` - the only hits are
-`core/logging_config.py`'s three-way `app_data_dir()` branch, not a
-test skip); a pip dependency resolver picking different transitive
-package versions per OS (compared real resolved wheel manifests for
-`manylinux_2_34_x86_64` vs `win_amd64` targets via `pip install
---platform ... --target ...` - `tifffile`, `scipy`, `numpy`, `PySide6`
-all matched between the two, so no OS-specific version-skew was found
-for the packages checked, though this comparison method turned out too
-fragile to fully trust - see caveat below).
+Fixed in `.github/workflows/ci.yml` with an `apt-get` step guarded by
+`if: runner.os == 'Linux'`. The package list was **derived, not
+guessed one-at-a-time**: `objdump -p` on the actual libraries this app
+loads gives their direct `NEEDED` entries, and only five name
+something Ubuntu's base system doesn't already guarantee:
 
-**What remains genuinely unresolved, and why it wasn't shipped as a
-fix**: the leading remaining hypothesis, well-documented in the wider
-PySide6/Qt community (not this project's own speculation) but **not
-confirmed against this project's actual CI failure**, is that the Qt
-`offscreen` platform plugin's native shared-library dependency chain -
-confirmed via `ldd` on the real `libqoffscreen.so` to include `libGL`,
-`libEGL`, `libxkbcommon`, `libX11`, `libfontconfig`, `libdbus-1`, and
-~15 more - can fail to initialize on a GPU-less Linux/Windows CI VM if
-any aren't present or the software-rendering fallback isn't correctly
-selected, while macOS's Qt build uses a self-contained, OS-native
-Cocoa/Core Graphics path that doesn't hit this class of problem. This
-is consistent with the Linux-and-Windows-fail-but-not-macOS split and
-is a widely-reported real-world PySide6-on-CI pitfall (multiple
-independent reports found and read, cited in the investigation, not
-just one blog post). **It could not be verified**: this dev machine
-already has every one of those shared libraries installed from normal
-desktop use, so `libqoffscreen.so` loads and a real `QApplication`
-constructs cleanly here (`app.platformName()` returns `"offscreen"`
-with no warnings) regardless of `PATH` restriction - there was no
-`docker`/`podman` available in this sandbox to build a genuinely bare
-Ubuntu container to test against, no `sudo`/apt access to remove
-system libraries and test the negative case, and no Windows machine at
-all to test that leg. Per this task's explicit instruction not to ship
-an unverified fix, `.github/workflows/ci.yml` was **not modified** -
-an `apt-get install libegl1 libxkbcommon0 ...` style change would be
-the standard community-recommended remedy for the Linux leg
-specifically, but adding it here would be guessing at a config change
-this investigation could not prove would fix the real failure, and
-would not address a Windows leg that has no analogous apt-based fix
-at all. This is the honest state to hand to a human for either (a)
-temporarily granting job-log read access to get the real traceback, or
-(b) trying the `apt-get`-based Linux mitigation directly against a
-real GH Actions run, which this sandboxed environment cannot do.
+| library | needed by | package |
+| --- | --- | --- |
+| `libEGL.so.1` | `libQt6Gui.so.6` | `libegl1` |
+| `libGL.so.1` | `libQt6Gui.so.6`, `platforms/libqoffscreen.so` | `libgl1` |
+| `libxkbcommon.so.0` | `libQt6Gui.so.6`, `libqoffscreen.so` | `libxkbcommon0` |
+| `libfontconfig.so.1` | `libQt6Gui.so.6` | `libfontconfig1` |
+| `libdbus-1.so.3` | `libQt6DBus.so.6` (a `NEEDED` of QtGui) | `libdbus-1-3` |
 
-Local verification performed instead (since the actual bug could not
-be reproduced, there was nothing broken to fix): full suite run twice
-in the *normal*, unrestricted environment (this machine's regular
-Python 3.12, `tesseract`/`soffice`/`gs` all on `PATH`) - **463 passed,
-0 skipped**, `ruff check .` clean, `mypy core cli gui` clean - matching
-the documented 463-test baseline exactly, confirming this investigation
-made no source changes and left the suite exactly as it found it.
+Everything else in the full `ldd` closure (`libglvnd0`, `libglx0`,
+`libx11-6`, `libxcb1`, `libfreetype6`, `libexpat1`, `libsystemd0`, ...)
+arrives as an apt dependency of those five - verified with `apt-cache
+depends`, so naming them would be redundant, not safer. Deliberately
+**not** installed: `libxcb-cursor0`/`-icccm4`/`-keysyms1`/`-randr0`/
+`-render-util0`/`-shape0`/`-xinerama0`, which appear in most
+"PySide6 headless CI" snippets on the web. Those are dependencies of
+the **xcb** platform plugin, which this job never loads
+(`QT_QPA_PLATFORM=offscreen`); `libqoffscreen.so` links only
+`libxcb.so.1`, which comes in via `libx11-6` anyway. Every plugin
+directory PySide6 ships was swept the same way to make sure nothing
+dlopen'd at runtime needs more: `imageformats`/`styles`/`iconengines`/
+`generic`/`platforminputcontexts` need nothing beyond the set above,
+and the only plugin that does (`platformthemes/libqgtk3.so`, which
+wants the whole GTK3 stack) is never loaded under offscreen.
+
+This is the one fix that cannot be validated locally - this dev machine
+is Ubuntu 24.04 (the same as `ubuntu-latest`) and already has all of
+these installed from normal desktop use, which is precisely why the
+bug was invisible here. It'll be proven by the next real CI run.
+
+### Windows, part 1: a real handle leak that silently defeated secure wipe
+
+```
+tests/integration/test_gui_smoke.py::test_sign_via_tools_menu_places_image
+tests/integration/test_gui_smoke.py::test_sign_dragged_on_the_canvas_lands_where_it_was_dropped
+E  PermissionError: [WinError 32] The process cannot access the file because it is
+   being used by another process: '...\appdata\sessions\<hex>\working.pdf'
+E  core.errors.SecurityError: Could not securely delete '...\working.pdf': [WinError 32]
+```
+
+**Not a test artefact - a security-relevant product defect.** Windows
+refuses to overwrite or unlink a file any handle still has open, so
+`core/security/secure_delete.py` couldn't wipe the session working
+copy: on Windows the app's core promise (SPEC.md section 1, "wipe on
+close, not just delete") was failing outright for any session where a
+signature had been placed. Linux and macOS unlink an open file happily,
+which is why this cost nothing on two of the three legs and why no
+existing test caught it.
+
+The leak was found, not guessed at, by reading `/proc/self/fd` around a
+real `MainWindow._run_tool("sign", ...)` run: the working copy is open
+before the call and still open after it, and still open across
+`close_session()` (there as `working.pdf (deleted)` - the Linux
+"unlinked but a handle still holds it" state, which is exactly what
+Windows refuses to allow in the first place). The holder is
+`PagePlacementCanvas`'s `QPdfDocument` (`gui/placement_canvas.py`),
+which previews the working copy: the canvas is parented to `SignDialog`
+which is parented to `MainWindow`, so it outlives `exec()` indefinitely
+and nothing ever released it. `MainWindow._render_thumbnails`' own
+`QPdfDocument` does *not* leak - it's a local, unparented, throwaway
+document destroyed by refcount at function exit - which is also why
+only the two signature tests failed and not every GUI test on Windows.
+
+**The genuinely surprising part, worth remembering: `QPdfDocument.close()`
+does not close the file.** The first fix written here was
+`close()` + `deleteLater()`, which looks obviously correct and is
+wrong: verified against Qt 6.11 via `/proc/self/fd`, the fd survives
+`close()` and only disappears when the object is *destroyed*
+(`deleteLater()` doesn't help either unless the deferred-delete event
+is actually delivered - `QApplication.processEvents()` by design does
+not deliver those). So the fix that shipped:
+
+- `PagePlacementCanvas` now creates its `QPdfDocument` **unparented**,
+  with `self._pdf` as the sole owner - the same throwaway pattern
+  `_render_thumbnails` already used - so clearing that attribute
+  destroys it there and then under CPython refcounting.
+- `PagePlacementCanvas.release_document()` closes and drops it,
+  idempotently; `load_document()` calls it first, so reloading can't
+  stack handles either.
+- `BaseToolDialog.release_resources()` (a documented no-op) /
+  `SignDialog.release_resources()` give every tool dialog a
+  deterministic "give back your OS handles" hook, and
+  `MainWindow._run_tool` calls it in a `finally` around the whole
+  dialog flow - accepted, cancelled or errored.
+  `WorkflowBuilderDialog._add_step` does the same for the dialogs it
+  exec()s, so the contract is "whoever exec()s a tool dialog releases
+  it", not a one-off at a single call site.
+- Safe to release before `values()` is read (and documented as such):
+  `SignDialog`'s rect always comes from the spin boxes, never from the
+  canvas.
+
+Regression tests assert **the handle is explicitly released**, not that
+deleting the file works - the latter passes on Linux whether the bug is
+present or not, which is the whole reason this survived to CI in the
+first place. `tests/unit/test_sign_placement_canvas.py` covers the
+canvas/dialog release contract, including one Linux-only
+(`/proc/self/fd`) test that pins the real OS-level behaviour *and* the
+`close()`-isn't-enough discovery above; `tests/integration/test_gui_smoke.py::
+test_sign_dialog_releases_the_working_file_before_the_session_is_wiped`
+covers the real `_run_tool` path for both the accepted and the
+cancelled dialog.
+
+### Windows, part 2: an over-constrained test, not a broken widening
+
+```
+tests/unit/test_dialog_sizing.py::test_shown_dialog_actually_uses_the_widened_size
+E  assert 533 == 582.5 ± 17.475
+```
+
+**Determination: the test was wrong, the 25%-wider override is fine on
+Windows** - and this was settled by reproducing the exact number
+locally rather than by reasoning about Windows. `QWidget::adjustSize()`,
+which sizes a top-level widget on its first `show()`, does not use
+`sizeHint()` raw:
+
+    shown = max(min(sizeHint, screen_width * 2 / 3), layout_minimum)
+
+Under `QT_QPA_PLATFORM=offscreen` the virtual screen is 800x800, so
+that cap is exactly **533** - the number Windows reported. Windows'
+native style makes `RotateDialog`'s natural width ~466 (vs. 238 under
+Fusion on Linux, a plain font/style-metrics difference), the override
+asks for ~582, and Qt caps it at 533. Reproduced on Linux by giving a
+`BaseToolDialog` a wide enough label: natural 469, widened 586, shown
+**533**, the same three numbers. The formula above was then checked
+against six dialogs spanning all three branches (uncapped,
+screen-capped, layout-minimum-dominated) and predicted the shown width
+to the pixel every time.
+
+So the old assertion compared a *pre-`show()`* baseline against
+*post-`show()`* geometry and assumed Qt applies a hint verbatim, which
+it doesn't. Nothing user-visible is wrong: the cap only bites because
+the headless virtual screen is 800px wide, and the audit that would
+catch a genuinely too-narrow dialog
+(`test_every_tool_dialog_button_fits_its_own_text`, which measures
+every button against its own `sizeHint()`) passes on Windows CI.
+
+Fixed by rewriting that single test - the module's other coverage is
+untouched - to assert the two things that are true on every platform:
+the overridden hint is still 1.25x the unmodified one *measured in the
+same post-`show()` state*, and the shown geometry is exactly what Qt's
+own rule derives from it. A new
+`test_qt_clamps_a_dialog_wider_than_two_thirds_of_the_screen` pins the
+clamp behaviour deliberately, so the next person to see a "too narrow"
+dialog width has the explanation in the suite rather than only in this
+file.
+
+### Verification and status
+
+`ruff check .` clean, `mypy core cli gui` clean, full suite **478
+passed** (470 baseline + 8 new tests; the `/proc/self/fd` one skips off
+Linux). The Sign dialog was also re-grabbed to PNG and looked at, per
+this project's usual convention, to confirm the unparented
+`QPdfDocument` still renders the page preview identically.
+
+Not pushed: CI config changes are the human's call to validate against
+a real GitHub run, which is the only place the Linux fix can be proven.

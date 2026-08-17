@@ -316,10 +316,11 @@ class PagePlacementCanvas(QGraphicsView):
         self.setMinimumSize(360, 440)
         self.setAccessibleName(self.tr("Page placement canvas"))
 
-        # Parented to this view (not left unowned) and reused across
-        # page changes: a dialog is short-lived, unlike MainWindow,
-        # where a self-parented QPdfDocument per thumbnail refresh
-        # would leak one instance per operation.
+        # Deliberately *not* parented to this view (see
+        # `load_document`/`release_document`): the only thing that
+        # actually closes the file a QPdfDocument has loaded is
+        # destroying it, so this reference has to be the sole owner in
+        # order for dropping it to be what releases the handle.
         self._pdf: QPdfDocument | None = None
         self._page_item: QGraphicsPixmapItem | None = None
         self._item: PlacementItem | None = None
@@ -333,12 +334,52 @@ class PagePlacementCanvas(QGraphicsView):
         """Load `path` for previewing. Returns False (and logs) if it
         can't be rendered, so a caller can silently fall back to plain
         numeric entry rather than blocking the tool on a preview."""
-        pdf = QPdfDocument(self)
+        self.release_document()
+        # No parent: `self._pdf` is the only owner, so clearing it
+        # destroys the document - and destruction is the only thing
+        # that closes the file (see `release_document`). Same
+        # throwaway-document pattern MainWindow._render_thumbnails
+        # already uses.
+        pdf = QPdfDocument()
         if pdf.load(str(path)) != QPdfDocument.Error.None_:
             log.error("Could not load PDF for placement preview: %s", path)
             return False
         self._pdf = pdf
         return True
+
+    def release_document(self) -> None:
+        """Release the OS file handle `QPdfDocument` holds on the
+        previewed file for as long as it is loaded. Idempotent; the
+        canvas simply has no page afterwards.
+
+        Why it must exist at all: this canvas previews the *session
+        working copy*, the confidential file `SessionTempDir.close()`
+        securely wipes (SPEC.md section 1). Windows refuses to
+        overwrite or unlink a file any handle still has open, so a
+        canvas left loaded makes `core/security/secure_delete.py` fail
+        with `WinError 32` - the wipe silently doesn't happen. Nothing
+        prompts that release on its own: the canvas is parented to a
+        dialog parented to `MainWindow`, so it long outlives the
+        `exec()` that showed it.
+
+        Why it drops the reference rather than just calling `close()`:
+        **`QPdfDocument.close()` does not close the file** (verified
+        against Qt 6.11 via /proc/self/fd - the fd is still there after
+        close() and only disappears when the object is destroyed;
+        `tests/unit/test_sign_placement_canvas.py` pins this). The
+        document is therefore unparented and owned solely by
+        `self._pdf`, so clearing that reference destroys it there and
+        then under CPython's refcounting - the same reason
+        MainWindow._render_thumbnails' throwaway document doesn't leak
+        a handle either. `close()` is still called first, to unload the
+        page data as soon as possible and to say what is meant.
+        """
+        if self._pdf is not None:
+            self._pdf.close()
+            self._pdf = None
+        self._scene.clear()
+        self._page_item = None
+        self._item = None
 
     def page_count(self) -> int:
         return self._pdf.pageCount() if self._pdf is not None else 0

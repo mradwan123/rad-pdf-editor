@@ -101,9 +101,18 @@ class WorkflowBuilderDialog(BaseToolDialog):
         # doesn't ship its own dialog (see plugins/README.md).
         if tool_id in TOOL_DIALOGS:
             tool_dialog = TOOL_DIALOGS[tool_id](self)
-            if tool_dialog.exec() != BaseToolDialog.DialogCode.Accepted:
-                return
-            values = tool_dialog.values()
+            # Same contract as MainWindow._run_tool: whoever exec()s a
+            # tool dialog releases whatever it holds afterwards. Nothing
+            # reachable from here opens a file today (a step is
+            # configured against no particular document, so SignDialog
+            # gets no path and builds no canvas), but the rule is the
+            # dialog's, not this call site's.
+            try:
+                if tool_dialog.exec() != BaseToolDialog.DialogCode.Accepted:
+                    return
+                values = tool_dialog.values()
+            finally:
+                tool_dialog.release_resources()
         else:
             values = {}
 

@@ -84,3 +84,20 @@ class BaseToolDialog(QDialog):
         """Return the kwargs to pass to `ToolPlugin.build_operation()`.
         Subclasses must override this."""
         raise NotImplementedError
+
+    def release_resources(self) -> None:
+        """Drop any OS resource (an open file handle, a loaded
+        document) this dialog holds. Called by whoever ran the dialog,
+        once it's finished with - a no-op for the ordinary dialogs,
+        which only own widgets.
+
+        Why this exists rather than relying on the dialog being
+        destroyed: every tool dialog is parented to `MainWindow`, so
+        Qt keeps it alive long after `exec()` returns, and the working
+        file it may have open lives in the session temp dir that
+        `AppController.close_session()` securely wipes. Windows
+        refuses to overwrite or unlink a file any handle still has
+        open, so a dialog still holding one turns "wipe the
+        confidential working copy on close" (SPEC.md section 1) into a
+        `SecurityError` - see `SignDialog.release_resources`.
+        """

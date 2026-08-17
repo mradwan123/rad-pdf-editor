@@ -19,7 +19,9 @@ hit-testing and drag maths, just without a synthetic pointer.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import sys
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -394,3 +396,104 @@ def test_the_preview_predicts_where_the_image_really_lands(
         _PAGE_HEIGHT_PT - py0,
     )
     assert _actual_image_bbox(path, placement) == pytest.approx(expected_fitz_bbox, abs=0.05)
+
+
+# --- releasing the previewed document -------------------------------------
+#
+# The canvas previews the *session working copy* - the confidential
+# file `SessionTempDir.close()` securely wipes (SPEC.md section 1) -
+# and QPdfDocument keeps an OS handle on whatever it has loaded.
+# Windows refuses to overwrite or unlink a file that any handle still
+# has open, so a canvas left loaded turns that wipe into a
+# SecurityError; on Linux/macOS the unlink silently succeeds anyway,
+# which is why these tests assert the handle is *explicitly released*
+# rather than asserting that deleting the file works (that would pass
+# here regardless of the bug, and did).
+
+
+def test_release_document_closes_the_previewed_file(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    canvas = _canvas(_make_pdf(tmp_path / "src.pdf"))
+    assert canvas.page_count() == 1
+    assert canvas.has_page()
+
+    canvas.release_document()
+
+    assert canvas.page_count() == 0
+    assert not canvas.has_page()
+    assert canvas.pdf_rect() is None
+    # Idempotent: cleanup can legitimately run more than once.
+    canvas.release_document()
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="/proc/self/fd is the Linux way to see open handles"
+)
+def test_release_document_actually_drops_the_os_file_handle(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """The real-behaviour version of the test above: the point is an
+    OS handle, so check the OS, not just our own state flags.
+
+    Linux-only because it reads /proc/self/fd - but what it proves
+    (QPdfDocument holds the file open until closed, and
+    release_document() closes it) is platform-independent; only the
+    consequence of *not* doing it differs, and only Windows enforces
+    it.
+    """
+    path = _make_pdf(tmp_path / "src.pdf")
+
+    def open_files() -> set[str]:
+        found = set()
+        for fd in os.listdir("/proc/self/fd"):
+            # The fd used to list the directory is itself gone by the
+            # time we read it back.
+            with contextlib.suppress(OSError):
+                found.add(os.readlink(f"/proc/self/fd/{fd}"))
+        return found
+
+    canvas = _canvas(path)
+    assert str(path) in open_files(), "expected QPdfDocument to hold the file open"
+
+    canvas.release_document()
+
+    assert str(path) not in open_files()
+
+
+def test_sign_dialog_release_resources_releases_the_canvas(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    dialog = SignDialog(None, _make_pdf(tmp_path / "src.pdf"))
+    assert dialog.canvas is not None
+    assert dialog.canvas.has_page()
+
+    dialog.release_resources()
+
+    assert not dialog.canvas.has_page()
+
+
+def test_sign_dialog_values_survive_releasing_the_canvas(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """MainWindow._run_tool releases the dialog on the way out, after
+    reading values() - but nothing should depend on that order, since
+    the rect always comes from the spin boxes, never from the canvas."""
+    dialog = SignDialog(None, _make_pdf(tmp_path / "src.pdf"))
+    dialog.set_image_path(_make_signature_image(tmp_path / "sig.png"))
+    canvas = dialog.canvas
+    assert canvas is not None
+    item = canvas.placement_item()
+    assert item is not None
+    item.set_rect(QRectF(100, 120, 200, 80))
+    canvas.rect_changed.emit()
+
+    dialog.release_resources()
+
+    assert dialog.values()["rect"] == (50.0, 300.0, 150.0, 340.0)
+
+
+def test_release_resources_is_a_no_op_without_a_canvas(qapp: QApplication) -> None:
+    # The Workflow builder's SignDialog has no document and so no
+    # canvas at all; releasing it must not raise.
+    SignDialog().release_resources()

@@ -526,6 +526,56 @@ def test_sign_dragged_on_the_canvas_lands_where_it_was_dropped(
     _force_close(window)
 
 
+@pytest.mark.parametrize("accepted", [True, False])
+def test_sign_dialog_releases_the_working_file_before_the_session_is_wiped(
+    qapp: QApplication, tmp_path: Path, accepted: bool
+) -> None:
+    """Regression: SignDialog's placement canvas previews the session
+    working copy through a QPdfDocument, which holds an OS handle on it
+    for as long as it is loaded, and the dialog is parented to
+    MainWindow - so it outlived exec() and was still holding that
+    handle when close_session() securely wiped the session dir.
+
+    Linux/macOS unlink an open file happily, so this cost nothing
+    locally; Windows refuses (WinError 32), which is how it surfaced -
+    both signature tests failing in CI inside
+    core/security/secure_delete.py. That makes it a real defect, not a
+    test artefact: on Windows the confidential working copy was not
+    being wiped on close at all.
+
+    Asserted as "the dialog explicitly released the document", not as
+    "deleting the file worked", because the latter passes on this
+    platform whether the bug is fixed or not. Both the accepted and
+    cancelled paths are checked - _run_tool releases in a finally.
+    """
+    from PIL import Image
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    sig = tmp_path / "sig.png"
+    Image.new("RGB", (200, 80), (255, 255, 255)).save(sig)
+
+    window = MainWindow()
+    _open_tab(window, src)
+    dialogs: list[SignDialog] = []
+
+    def fake_sign(self: SignDialog) -> QDialog.DialogCode:
+        dialogs.append(self)
+        assert self.canvas is not None
+        assert self.canvas.page_count() == 1, "the preview should be loaded here"
+        self.set_image_path(sig)
+        return QDialog.DialogCode.Accepted if accepted else QDialog.DialogCode.Rejected
+
+    with patch.object(SignDialog, "exec", fake_sign):
+        window._run_tool("sign", SignDialog)
+
+    assert len(dialogs) == 1
+    canvas = dialogs[0].canvas
+    assert canvas is not None
+    assert canvas.page_count() == 0, "the previewed document is still open"
+    assert not canvas.has_page()
+    _force_close(window)
+
+
 def test_create_form_field_via_tools_menu_adds_a_text_field(
     qapp: QApplication, tmp_path: Path
 ) -> None:

@@ -169,6 +169,21 @@ class SignDialog(BaseToolDialog):
 
     # --- result -------------------------------------------------------------
 
+    def release_resources(self) -> None:
+        """Close the previewed document (see
+        `BaseToolDialog.release_resources`). This is the one dialog in
+        the app that opens a file of its own: the canvas holds the
+        *session working copy* open through a `QPdfDocument` for as
+        long as it's loaded, and that file gets securely wiped when the
+        document/session closes.
+
+        Safe to call before `values()` is read: the rect always comes
+        from the spin boxes, never from the canvas (see the module
+        docstring), so releasing the preview can't change the result.
+        """
+        if self.canvas is not None:
+            self.canvas.release_document()
+
     def values(self) -> dict[str, Any]:
         if self._image_path is None:
             # _run_tool only catches PDFEditorError, not bare

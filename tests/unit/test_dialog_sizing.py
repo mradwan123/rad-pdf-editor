@@ -24,9 +24,10 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication, QDialog, QPushButton
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton
 
 from core.registry.registry import Registry, discover_and_load
+from gui.dialogs.base_tool_dialog import BaseToolDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
 from gui.dialogs.merge_dialog import MergeDialog
 from gui.dialogs.rotate_dialog import RotateDialog
@@ -80,15 +81,103 @@ def test_workflow_builder_dialog_non_standard_constructor_is_25_percent_wider() 
 
 
 def test_shown_dialog_actually_uses_the_widened_size() -> None:
-    # sizeHint() alone proves the computation; this proves Qt's real
-    # show() path actually applies it to a live top-level widget size,
-    # not just that the overridden method returns the right number.
+    """sizeHint() alone proves the computation; this proves Qt's real
+    show() path actually applies it to a live top-level widget size,
+    not just that the overridden method returns the right number.
+
+    **"shown width == 1.25x the natural width" is not a valid
+    cross-platform invariant, and asserting it was this test's own
+    bug.** It passed on Linux/macOS and failed on Windows CI with
+    `assert 533 == 582.5 +- 17.475`. The widening is not broken there:
+    `QWidget::adjustSize()`, which is what sizes a top-level widget on
+    its first show, does not use `sizeHint()` raw - it clamps it to
+    two thirds of the screen and then floors it at the layout's own
+    minimum size:
+
+        shown = max(min(sizeHint, screen_width * 2 / 3), layout_minimum)
+
+    Under `QT_QPA_PLATFORM=offscreen` the virtual screen is 800x800,
+    so that cap is exactly **533** - the number Windows CI reported.
+    Windows' native style makes this dialog's natural width ~466 (vs.
+    238 under Fusion on Linux), the override asks for ~582, and Qt
+    caps it at 533. Nothing platform-specific in the clamp itself: it
+    was reproduced here on Linux by adding a wide enough label to a
+    `BaseToolDialog` (natural 469, widened 586, shown 533 - the exact
+    same numbers), and the formula above was verified to predict the
+    shown width to the pixel across six dialogs spanning all three
+    branches (uncapped, capped, and minimum-dominated).
+
+    Nor is it a user-visible problem: the cap only bites because the
+    headless virtual screen is 800px wide. On a real desktop, two
+    thirds of the screen is far wider than any tool dialog here. And
+    `test_every_tool_dialog_button_fits_its_own_text` below covers the
+    thing that would actually matter if a dialog *were* clamped
+    (truncated button text) - it passes on Windows CI.
+
+    So this asserts the two things that are genuinely true everywhere:
+    the overridden hint is still 1.25x at show time, and the shown
+    geometry is exactly what Qt derives from that hint.
+    """
     _qapp()
     dialog = RotateDialog()
-    natural_width = QDialog.sizeHint(dialog).width()
     dialog.show()
+    QApplication.processEvents()
     try:
-        assert dialog.width() == pytest.approx(natural_width * 1.25, rel=_TOLERANCE)
+        # Measured after show(), like the geometry it's compared
+        # against: a style's polish() runs on show and can legitimately
+        # change font metrics, so a hint sampled before show() is not
+        # necessarily the one Qt sized the window from.
+        natural_width = QDialog.sizeHint(dialog).width()
+        widened_width = dialog.sizeHint().width()
+        assert widened_width == pytest.approx(natural_width * 1.25, rel=_TOLERANCE)
+
+        layout = dialog.layout()
+        assert layout is not None
+        screen = QApplication.primaryScreen()
+        assert screen is not None
+        cap = screen.geometry().width() * 2 // 3
+        expected = max(min(widened_width, cap), layout.totalMinimumSize().width())
+        assert dialog.width() == expected
+    finally:
+        dialog.close()
+
+
+def test_qt_clamps_a_dialog_wider_than_two_thirds_of_the_screen() -> None:
+    """The Windows CI failure above, reproduced deliberately on any
+    platform: a dialog whose widened hint exceeds two thirds of the
+    screen gets that width from `QWidget::adjustSize()`, not the hint.
+
+    Kept as a real test rather than only as prose in the docstring
+    above, because it is the whole reason that failure was read as
+    "the assertion was wrong" instead of "the widening is broken on
+    Windows": the override still returns its full 1.25x here (checked
+    below): Qt just declines to open a window that big.
+    """
+    app = _qapp()
+    screen = app.primaryScreen()
+    assert screen is not None
+    cap = screen.geometry().width() * 2 // 3
+
+    class _WideDialog(BaseToolDialog):
+        def __init__(self) -> None:
+            super().__init__("Wide", None)
+            # Sized in ex-widths of the live font rather than a fixed
+            # pixel count, so this stays "wider than the cap" whatever
+            # the platform's default font is.
+            label = QLabel("W" * 40)
+            while label.sizeHint().width() < cap:
+                label.setText(label.text() * 2)
+            self.add_full_width(label)
+
+    dialog = _WideDialog()
+    dialog.show()
+    QApplication.processEvents()
+    try:
+        natural_width = QDialog.sizeHint(dialog).width()
+        assert dialog.sizeHint().width() == pytest.approx(
+            natural_width * 1.25, rel=_TOLERANCE
+        )
+        assert dialog.width() < dialog.sizeHint().width()
     finally:
         dialog.close()
 
