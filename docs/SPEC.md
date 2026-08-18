@@ -110,6 +110,7 @@ This single abstraction is what makes undo/redo, autosave, the audit trail, and 
 - **Phase 3 — Conversions.** Word/PPT/Excel/JPG/HTML both directions — hand fully to Conversion agent, sandboxed.
 - **Phase 4 — Scans.** OCR, Deskew, Repair.
 - **Phase 5 — Automation & polish.** Workflows UI (pipeline builder + save/replay), plugin manifest docs for the team, installers.
+- **Phase 6 — Editor.** Page viewer, on-canvas direct manipulation, page-content editing (markup, redaction, insert, text editing), background execution, and a full design system. Phases 1–5 built 36 whole-document/whole-page transforms and a thumbnail-grid UI; Phase 6 is what makes this a document *editor* rather than a batch suite. Adds a new class of `Operation` (`core/ops/annotate.py`, `redact.py`, `content.py`, `text_edit.py`) and one optional additive method on `Operation` — see `docs/GUI_PLAN.md` for the full design, sequencing and risks.
 
 ## 5. Open items for later (not blocking Phase 0)
 
