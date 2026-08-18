@@ -1,0 +1,246 @@
+"""Construction of `MainWindow`'s actions, menus and toolbar.
+
+Split out of `gui/main_window.py` in Phase 6a (docs/GUI_PLAN.md §3.1):
+this is ~200 lines of pure setup that the window ran once at
+construction and never touched again, and Phase 6 adds a whole toolbar
+of editing tools to it.
+
+These are free functions taking the window rather than a mixin,
+because nothing here is called after construction - there is no
+behaviour to inherit, only wiring to perform. Every `QAction` is still
+assigned onto the window (`window.undo_action`, ...) exactly as
+before, so every existing caller and test keeps working unchanged.
+
+`window.tr()` is used rather than a module-level helper so the
+translation context stays "MainWindow" for strings that were already
+collected under it (SPEC.md 6.2).
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtWidgets import QToolBar
+
+from gui.dialogs.tool_dialog_registry import TOOL_DIALOGS
+
+if TYPE_CHECKING:
+    from gui.main_window import MainWindow
+
+
+def build_actions(window: MainWindow) -> None:
+    """Build every action, menu and the toolbar, and attach them to
+    `window`. Called once from `MainWindow.__init__`."""
+    _build_file_menu(window)
+    _build_edit_menu(window)
+    _build_tools_menu(window)
+    _build_workflows_menu(window)
+    _build_toolbar(window)
+    build_view_menu(window)
+
+
+def _build_file_menu(window: MainWindow) -> None:
+    window.open_action = QAction(window.tr("&Open..."), window)
+    window.open_action.setShortcut("Ctrl+O")
+    window.open_action.triggered.connect(window._open_document)
+
+    # Lambdas, not bare bound methods, for every slot whose first
+    # parameter is optional: QAction.triggered carries a `checked`
+    # bool, which PySide6 would happily bind to `_save_as(tab=...)` /
+    # `_close_other_tabs(index=...)` as a positional argument.
+    window.save_as_action = QAction(window.tr("&Save As..."), window)
+    window.save_as_action.setShortcut("Ctrl+S")
+    window.save_as_action.triggered.connect(lambda: window._save_as())
+
+    window.close_action = QAction(window.tr("&Close Tab"), window)
+    window.close_action.setShortcut("Ctrl+W")
+    window.close_action.triggered.connect(window._close_document)
+
+    window.close_other_tabs_action = QAction(window.tr("Close Ot&her Tabs"), window)
+    window.close_other_tabs_action.triggered.connect(lambda: window._close_other_tabs())
+
+    window.close_all_tabs_action = QAction(window.tr("Close &All Tabs"), window)
+    window.close_all_tabs_action.triggered.connect(lambda: window._close_all_tabs())
+
+    # QTabWidget has no built-in tab cycling - these are wired
+    # explicitly (and live in the File menu so their shortcuts are
+    # actually registered with the window, not just declared).
+    window.next_tab_action = QAction(window.tr("&Next Tab"), window)
+    window.next_tab_action.setShortcut("Ctrl+Tab")
+    window.next_tab_action.triggered.connect(lambda: window._cycle_tab(1))
+
+    window.previous_tab_action = QAction(window.tr("&Previous Tab"), window)
+    window.previous_tab_action.setShortcut("Ctrl+Shift+Tab")
+    window.previous_tab_action.triggered.connect(lambda: window._cycle_tab(-1))
+
+    file_menu = window.menuBar().addMenu(window.tr("&File"))
+    file_menu.addAction(window.open_action)
+    window.recent_files_menu = file_menu.addMenu(window.tr("Open &Recent"))
+    window.recent_files_menu.aboutToShow.connect(window._populate_recent_files_menu)
+    file_menu.addAction(window.save_as_action)
+    file_menu.addSeparator()
+    file_menu.addAction(window.close_action)
+    file_menu.addAction(window.close_other_tabs_action)
+    file_menu.addAction(window.close_all_tabs_action)
+    file_menu.addSeparator()
+    file_menu.addAction(window.next_tab_action)
+    file_menu.addAction(window.previous_tab_action)
+
+
+def _build_edit_menu(window: MainWindow) -> None:
+    window.undo_action = QAction(window.tr("&Undo"), window)
+    window.undo_action.setShortcut("Ctrl+Z")
+    window.undo_action.triggered.connect(window._undo)
+
+    window.redo_action = QAction(window.tr("&Redo"), window)
+    window.redo_action.setShortcut("Ctrl+Shift+Z")
+    window.redo_action.triggered.connect(window._redo)
+
+    edit_menu = window.menuBar().addMenu(window.tr("&Edit"))
+    edit_menu.addAction(window.undo_action)
+    edit_menu.addAction(window.redo_action)
+
+
+def _tool_categories(window: MainWindow) -> list[tuple[str, list[str]]]:
+    """(submenu label, ordered tool_ids) - grouped so the Tools menu
+    doesn't grow into one flat 30+-item list as new tool_ids are added.
+    Every TOOL_DIALOGS key must appear in exactly one group (checked by
+    the caller) so a forgotten category can't silently drop a tool."""
+    return [
+        (
+            window.tr("&Organize Pages"),
+            ["merge", "extract_pages", "reorder_pages", "rotate_pages", "delete_pages", "flip"],
+        ),
+        (
+            window.tr("&Edit and Design"),
+            [
+                "crop",
+                "resize",
+                "n_up",
+                "grayscale",
+                "watermark",
+                "header_footer",
+                "bates_numbering",
+            ],
+        ),
+        (
+            window.tr("F&orms and Signatures"),
+            ["fill_form", "sign", "create_form_field", "flatten", "remove_annotations"],
+        ),
+        (window.tr("&Security"), ["protect", "unlock"]),
+        (window.tr("&Document Properties"), ["set_metadata", "rename", "compress"]),
+        (
+            window.tr("Convert &from PDF"),
+            ["pdf_to_docx", "pdf_to_pptx", "pdf_to_xlsx", "pdf_to_html", "pdf_to_jpg"],
+        ),
+        (
+            window.tr("Convert &to PDF"),
+            ["docx_to_pdf", "pptx_to_pdf", "xlsx_to_pdf", "html_to_pdf", "jpg_to_pdf"],
+        ),
+        # Phase 4 (Scans) didn't exist when the seven categories above
+        # were first drawn up, and none of them is a clean fit -
+        # OCR/Deskew/Repair operate on a whole scanned/damaged
+        # document, not page layout, form/security, or format
+        # conversion. An eighth category, rather than forcing one of
+        # these into a group it doesn't belong in.
+        (window.tr("Scans &and Repair"), ["ocr", "deskew", "repair"]),
+    ]
+
+
+def _build_tools_menu(window: MainWindow) -> None:
+    tools_menu = window.menuBar().addMenu(window.tr("&Tools"))
+    categorized_tool_ids: set[str] = set()
+    for category_label, tool_ids in _tool_categories(window):
+        category_menu = tools_menu.addMenu(category_label)
+        for tool_id in tool_ids:
+            dialog_cls = TOOL_DIALOGS[tool_id]
+            plugin = window.registry.get(tool_id)
+            action = QAction(plugin.display_name, window)
+            action.triggered.connect(window._make_tool_handler(tool_id, dialog_cls))
+            category_menu.addAction(action)
+            window.tool_actions[tool_id] = action
+            categorized_tool_ids.add(tool_id)
+    if categorized_tool_ids != set(TOOL_DIALOGS):
+        missing = sorted(set(TOOL_DIALOGS) - categorized_tool_ids)
+        raise ValueError(f"Tools menu categories missing tool_id(s): {missing}")
+
+
+def _build_workflows_menu(window: MainWindow) -> None:
+    # Building/running a workflow is document-independent (Build
+    # doesn't touch any open document at all; Run works against a
+    # standalone input/output pair), so these two actions are hand-wired
+    # here rather than going through TOOL_DIALOGS / the Tools-menu loop,
+    # and are never added to window.tool_actions (which
+    # _update_action_state disables when no document is open).
+    window.build_workflow_action = QAction(window.tr("&Build Workflow..."), window)
+    window.build_workflow_action.triggered.connect(window._build_workflow)
+
+    window.run_workflow_action = QAction(window.tr("&Run Workflow..."), window)
+    window.run_workflow_action.triggered.connect(window._run_workflow)
+
+    workflows_menu = window.menuBar().addMenu(window.tr("&Workflows"))
+    workflows_menu.addAction(window.build_workflow_action)
+    workflows_menu.addAction(window.run_workflow_action)
+
+
+def _build_toolbar(window: MainWindow) -> None:
+    window.toolbar = QToolBar(window.tr("Main"))
+    window.toolbar.setAccessibleName(window.tr("Main toolbar"))
+    window.addToolBar(window.toolbar)
+    window.toolbar.addAction(window.open_action)
+    window.toolbar.addAction(window.save_as_action)
+    window.toolbar.addSeparator()
+    window.toolbar.addAction(window.undo_action)
+    window.toolbar.addAction(window.redo_action)
+
+
+def build_view_menu(window: MainWindow) -> None:
+    window.zoom_in_action = QAction(window.tr("Zoom &In"), window)
+    # QKeySequence.StandardKey.ZoomIn resolves to the literal "Ctrl++"
+    # on this platform (confirmed via QKeySequence.keyBindings), but
+    # '+' isn't its own physical key on most keyboard layouts - it's
+    # Shift+'=' on a US layout, and varies further on non-US ones.
+    # Relying on the standard key alone means a user who presses the
+    # unshifted "Ctrl+=" (the binding browsers/editors also accept for
+    # exactly this reason) sees nothing happen. setShortcuts (plural)
+    # keeps every platform alternate StandardKey.ZoomIn already
+    # provides and adds "Ctrl+=" explicitly, rather than replacing the
+    # standard binding outright.
+    window.zoom_in_action.setShortcuts(
+        [*QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomIn), QKeySequence("Ctrl+=")]
+    )
+    window.zoom_in_action.triggered.connect(window._zoom_in)
+
+    window.zoom_out_action = QAction(window.tr("Zoom &Out"), window)
+    window.zoom_out_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
+    window.zoom_out_action.triggered.connect(window._zoom_out)
+
+    window.reset_zoom_action = QAction(window.tr("&Reset Zoom"), window)
+    window.reset_zoom_action.setShortcut("Ctrl+0")
+    window.reset_zoom_action.triggered.connect(window._reset_zoom)
+
+    window.toggle_toolbar_action = QAction(window.tr("Show &Toolbar"), window)
+    window.toggle_toolbar_action.setCheckable(True)
+    window.toggle_toolbar_action.setChecked(True)
+    window.toggle_toolbar_action.toggled.connect(window._toggle_toolbar)
+
+    window.toggle_statusbar_action = QAction(window.tr("Show Status &Bar"), window)
+    window.toggle_statusbar_action.setCheckable(True)
+    window.toggle_statusbar_action.setChecked(True)
+    window.toggle_statusbar_action.toggled.connect(window._toggle_statusbar)
+
+    window.full_screen_action = QAction(window.tr("&Full Screen"), window)
+    window.full_screen_action.setShortcut("F11")
+    window.full_screen_action.setCheckable(True)
+    window.full_screen_action.toggled.connect(window._toggle_full_screen)
+
+    view_menu = window.menuBar().addMenu(window.tr("&View"))
+    view_menu.addAction(window.zoom_in_action)
+    view_menu.addAction(window.zoom_out_action)
+    view_menu.addAction(window.reset_zoom_action)
+    view_menu.addSeparator()
+    view_menu.addAction(window.toggle_toolbar_action)
+    view_menu.addAction(window.toggle_statusbar_action)
+    view_menu.addSeparator()
+    view_menu.addAction(window.full_screen_action)

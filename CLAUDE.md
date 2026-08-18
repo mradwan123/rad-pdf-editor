@@ -1983,3 +1983,105 @@ this project's usual convention, to confirm the unparented
 
 Not pushed: CI config changes are the human's call to validate against
 a real GitHub run, which is the only place the Linux fix can be proven.
+
+## Phase 6 — Editor (planned in full; 6a done)
+
+`docs/GUI_PLAN.md` is the design record; `docs/SPEC.md` section 4 has
+the roadmap entry. The reframing that drove it: Phases 1-5 built 36
+whole-document/whole-page *transforms* behind a thumbnail-grid UI, so
+there is no page viewer, no text selection, no find, no annotation and
+no redaction. Closing that is GUI work **plus a new class of
+`Operation`**, not GUI work alone.
+
+Thirteen decisions are locked in the plan's §1 table. The two library
+findings that shaped the architecture, both verified against the
+installed versions rather than assumed:
+
+- **QtPdf's model classes don't need `QPdfView`.** `QPdfSearchModel`,
+  `QPdfDocument.getSelection()`/`getAllText()`, `QPdfSelection`,
+  `QPdfBookmarkModel`, `QPdfLinkModel`, `QPdfPageNavigator` and
+  `QPdfPageRenderer` all work off a `QPdfDocument`. So a custom
+  `QGraphicsView` canvas can have editable overlays *and* real text
+  selection/find/outline - the tradeoff that would otherwise have
+  decided the viewer architecture doesn't exist. `QPdfPageRenderer`
+  also gives async, queued rendering.
+- **PyMuPDF 1.28.2 already covers every annotation type** plus
+  `add_redact_annot`/`apply_redactions` for redaction that genuinely
+  removes content. No new dependency for markup/redact/insert.
+
+Design consequences worth remembering (plan §3.7): annotation identity
+uses a UUID in `/NM`, **not** `xref` - every commit writes a new
+working file, so xrefs aren't stable across edits. Progress reporting
+uses an opt-in `SupportsProgress` mixin rather than an optional param
+on `Operation.apply`, because existing subclasses declare
+`apply(self, doc)` and would raise `TypeError` when called with it - a
+breaking change wearing an additive costume.
+
+### 6a — `main_window.py` decomposed (done)
+
+1174 -> 541 lines, a **pure move**: full suite **478 passed**, byte-for
+-byte the same count as the pre-refactor baseline, with **zero test
+changes**. `ruff` and `mypy core cli gui` clean.
+
+- `gui/actions.py` - actions, menus, toolbar. Free functions taking
+  the window, not a mixin: nothing here is called after construction,
+  so there is no behaviour to inherit, only wiring to perform.
+- `gui/tab_manager.py` - `TabManagementMixin` (tab lifecycle).
+- `gui/tool_runner.py` - `ToolRunnerMixin` (tool dialogs, thumbnail
+  context/reorder operations, workflows, `_busy_cursor`).
+- `gui/rendering.py` - `render_thumbnails()`, free function. Phase 6b
+  turns this into the async/cached path.
+- `gui/window_parts.py` - `WindowPart`, the typing base.
+
+**Mixins, not collaborator objects, and that was forced by the test
+suite** - roughly twenty of these methods are called directly on the
+window (`window._close_tab(...)`) and three are patched on the class
+(`patch.object(MainWindow, "_add_tab")`). A mixin keeps every one
+resolving on `MainWindow` unchanged; a collaborator would have needed
+a delegating shim per method.
+
+`gui/window_parts.py`'s `WindowPart` is **only a type-checking
+construct**: to mypy it's a `QMainWindow` declaring every shared
+attribute and cross-part method signature, and at runtime it is an
+empty plain class. Two real reasons, not style:
+1. PySide6 does not support inheriting from two QObject-derived
+   classes, so the mixins must not themselves be `QMainWindow`
+   subclasses at runtime.
+2. A stub with a real body would sit *ahead of* `QMainWindow` in the
+   MRO (confirmed live: `MainWindow -> TabManagementMixin ->
+   ToolRunnerMixin -> WindowPart -> QMainWindow -> QWidget`) and could
+   silently shadow a genuine Qt method. Guarding the whole class
+   behind `TYPE_CHECKING` makes that impossible.
+
+Only methods a mixin calls on *another* part are declared there - a
+name both declared in `WindowPart` and defined in a mixin is checked
+as an override, so signatures must match exactly.
+
+**Things that had to stay put, found by grepping the tests first
+rather than discovered by a red suite:**
+- `_THUMBNAIL_SIZE`, `_THUMBNAIL_ZOOM_MIN_WIDTH`/`_MAX_WIDTH`/`_STEP`
+  are imported from `gui.main_window` by the View-menu tests.
+- `patch("gui.main_window.QMessageBox.critical")` and friends patch a
+  *class attribute*, so they keep intercepting even though
+  `_run_workflow`'s `QMessageBox.information` call now lives in
+  `tool_runner.py`. `gui.main_window` still has to import
+  `QMessageBox`/`QFileDialog` for the patch target to resolve, which
+  it does (`_show_error_message`, `_save_as`, `restore_autosaved_session`).
+- Every `QAction` is still assigned onto the window
+  (`window.undo_action = ...`) from `actions.py`. mypy can only infer
+  an attribute from an assignment *inside* the class, so `MainWindow`
+  now carries class-level annotations for all 17 actions plus
+  `recent_files_menu`/`toolbar` - otherwise every later use is an
+  `attr-defined` error.
+
+One behaviour change was made and then reverted deliberately: an
+added `log.error` in `_show_error`. 6a is a pure move; an improvement,
+however small, doesn't belong in it.
+
+Verified beyond the suite, per this project's convention: a live
+`MainWindow` under `QT_QPA_PLATFORM=offscreen` with the real
+palette/stylesheet applied, walking the actual menu tree - 5 top-level
+menus, 8 Tools submenus with the same counts, all 36 `tool_actions`
+matching `TOOL_DIALOGS`, the `Ctrl+=` zoom alternate still bound - and
+`grab()`ed to PNG and looked at (branded empty state, toolbar with
+Save As/Undo/Redo correctly disabled).
