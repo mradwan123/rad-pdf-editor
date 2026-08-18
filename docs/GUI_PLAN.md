@@ -52,6 +52,11 @@ GUI work *plus* a new class of `Operation` — not GUI work alone.
 | 6 | Undo granularity | One `Operation` per committed edit |
 | 7 | Viewer engine | Custom `QGraphicsView` canvas + QtPdf's model classes |
 | 8 | Visual scope | Full design system — icons, panels, notifications, light/dark |
+| 9 | Annotation editing | Fully re-editable after commit — select, move, restyle, delete |
+| 10 | Redaction scope | Rect **and** search-and-redact document-wide, **plus** metadata/XMP/bookmark/attachment scrub |
+| 11 | Progress reporting | Real per-page progress where the operation loops pages; indeterminate + elapsed time for opaque ones |
+| 12 | Font fallback on text edit | Warn, preview the substitute, let the user accept / choose another / cancel |
+| 13 | Session persistence | UI state **and** reopen last session's documents, behind a preference |
 
 ---
 
@@ -254,6 +259,58 @@ file" — never a half-written document replacing a good one.
   and `QMenu.exec` are compiled and unpatchable, which has hung this
   project's headless tests before.
 
+### 3.7 Consequences of decisions 9–13
+
+**Annotation identity must survive a rewrite (dec. 9).** Every commit
+writes a *new* working file, so PyMuPDF `xref` values are not stable
+across edits. Each annotation this app creates is therefore stamped
+with a UUID in its `/NM` (annotation name) entry — the PDF spec's own
+per-page unique identifier — and every annotation-editing `Operation`
+addresses its target by that name, not by index or xref. The canvas
+keeps a live annotation layer built from `page.annots()`, hit-testable
+and handle-draggable, reusing the same `PlacementItem` base as every
+other on-canvas tool (§3.2).
+
+**Redaction is a two-stage tool (dec. 10).** Stage one *finds*:
+either a dragged rect, or a search string resolved to every occurrence
+document-wide plus every hit in metadata, XMP, bookmarks, attachments
+and annotation contents. Stage two *reviews and applies*: a checklist
+the user can deselect from, then `add_redact_annot` +
+`apply_redactions` for page content, and explicit removal for the
+non-content hits — which is where "redacted" PDFs most often still
+leak. `RedactOperation` therefore takes an explicit list of targets,
+so a CLI or Workflow run is exactly as thorough as a GUI one and never
+depends on an interactive step.
+
+**Progress is opt-in per operation (dec. 11).** A `SupportsProgress`
+mixin in `core/model/` exposes `set_progress_callback(cb)` with a
+no-op default; page-looping operations call it. `Operation.apply`'s
+frozen signature is untouched — the runner feature-detects the mixin
+and shows an indeterminate bar with elapsed time for everything else.
+Adding an optional parameter to `apply()` was rejected: existing
+subclasses declare `apply(self, doc)` and would raise `TypeError` when
+called with it, which is a breaking change wearing an additive
+costume.
+
+**Font substitution is surfaced before commit (dec. 12).** The text
+edit tool resolves the span's font via `pdf.extract_font(xref)` first;
+if it is not extractable, the commit is held and a comparison preview
+is shown (original vs. substitute, rendered) with accept / choose
+another / cancel. Nothing is written until the user chooses.
+
+**Session restore is a preference, not a default assumption (dec.
+13).** `core/session/ui_state.py` persists panel geometry, visibility,
+zoom/fit mode, theme, active tool and annotation defaults, plus the
+open document set, to `app_data_dir()` as JSON — Qt-free and honouring
+`PDFEDITOR_APP_DATA_DIR`, matching `recent_files.py` exactly rather
+than using `QSettings`. Because this app's whole premise is
+confidential documents, reopening is governed by an explicit
+**"Reopen documents on launch"** preference and a **"Clear saved
+session"** action, so a shared or presented-from machine can turn it
+off without losing panel layout. Restored documents are reopened from
+their original paths through the normal open path — session temp dirs
+are never resurrected.
+
 ---
 
 ## 4. Sequencing
@@ -267,9 +324,10 @@ pytest — before the next begins.
 | **6b** | Rendering layer: async, cached, targeted invalidation (§3.5). Still thumbnails-only — the win is measurable before any new UI exists. |
 | **6c** | Page viewer + sidebar layout (§3.2), read-only: scroll, zoom, fit modes, text selection, find, outline, links. |
 | **6d** | Background execution with progress and cancel (§3.5). |
-| **6e** | Markup, redaction and insert operations (§3.3) with their canvas tools (§3.4); selection-aware dialogs; existing rect tools moved on-canvas. |
-| **6f** | Design system: icons, toolbar, panels, notifications, light/dark, command palette (§3.6). |
-| **6g** | Text editing (§5.1), explicitly experimental and gated behind a warning. |
+| **6e** | Markup and insert operations (§3.3) with their canvas tools (§3.4), including the re-editable annotation layer (§3.7); selection-aware dialogs; existing rect tools moved on-canvas. |
+| **6f** | Redaction: rect, document-wide search-and-redact, and the metadata/XMP/bookmark/attachment scrub with its review step (§3.7). Split from 6e because it is security-critical and deserves its own verification pass. |
+| **6g** | Design system: icons, toolbar, panels, notifications, light/dark, command palette (§3.6); session restore and its preference (§3.7). |
+| **6h** | Text editing (§5.1), explicitly experimental, with the font-substitution preview of §3.7 gating every commit. |
 
 6a–6d are infrastructure with no new user-facing tools; 6c is the
 first slice that visibly changes the product.
@@ -296,11 +354,12 @@ we have. The workable technique:
 
 Scope honestly: **single-span, single-line edits first.** Reflowing a
 paragraph across line breaks, around figures, or across a page
-boundary is a materially harder problem and is not in 6g. Acrobat
+boundary is a materially harder problem and is not in 6h. Acrobat
 itself does this imperfectly; the failure mode to avoid is not
 imperfection but *undisclosed* imperfection.
 
-This is why 6g is last and gated.
+This is why 6h is last, and why decision 12 holds every commit behind
+a rendered comparison of the original and the substitute.
 
 ### 5.2 Per-edit commit cost
 
