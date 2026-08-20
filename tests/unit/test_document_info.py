@@ -9,7 +9,6 @@ broken), not just "didn't raise" - this project's standing convention.
 
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +23,7 @@ from core.document_info import (
     points_to_mm,
     read_document_info,
 )
+from core.file_times import birth_time
 from core.model.document import DocumentSession
 from core.ops.metadata import _FIELD_TO_DOCINFO_KEY, SetMetadataOperation
 
@@ -187,24 +187,46 @@ def test_file_info_for_a_source_that_has_since_been_deleted(tmp_path: Path) -> N
     assert info.geometry is not None
 
 
-@pytest.mark.skipif(
-    not hasattr(os.stat(__file__), "st_birthtime"),
-    reason="this filesystem/platform records no creation time",
-)
-def test_creation_time_is_reported_where_the_platform_records_one(tmp_path: Path) -> None:
+def test_creation_time_is_reported_on_a_filesystem_that_records_one(tmp_path: Path) -> None:
+    """Including on Linux, where `os.stat()` has no `st_birthtime` and
+    `core/file_times.py` calls `statx()` to get it - see
+    `tests/unit/test_file_times.py` for that mechanism itself.
+
+    Skipped only where the *filesystem under tmp_path* genuinely
+    records no birth time, which is a real possibility (some tmpfs and
+    NFS mounts) - not where the platform merely needs a different
+    syscall to read one.
+    """
     source = _letter(tmp_path / "src.pdf")
+    if birth_time(source) is None:
+        pytest.skip("this filesystem records no creation time")
+
     info = read_document_info(source, source_path=source)
     assert isinstance(info.file.created, datetime)
+    # A file created moments ago must read as created moments ago -
+    # `st_ctime` (inode change time) would also pass that, so the
+    # test below is what rules the wrong-field mistake out.
+    assert abs((datetime.now().astimezone() - info.file.created).total_seconds()) < 60
 
 
-def test_creation_time_is_none_rather_than_a_wrong_value_when_unavailable(tmp_path: Path) -> None:
-    """`st_ctime` is the inode *change* time, not a creation time; on a
-    platform with no `st_birthtime` this must come back as "unknown"
-    rather than quietly showing something else."""
+def test_creation_time_is_none_rather_than_a_wrong_value_when_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`st_ctime` is the inode *change* time, not a creation time. Where
+    no real creation time can be read, this must come back as
+    "unknown" rather than quietly showing something else - so the
+    unavailable case is forced here rather than waiting for a
+    filesystem that happens to exhibit it."""
+    monkeypatch.setattr("core.document_info.birth_time", lambda *args, **kwargs: None)
     source = _letter(tmp_path / "src.pdf")
+
     info = read_document_info(source, source_path=source)
-    if not hasattr(source.stat(), "st_birthtime"):
-        assert info.file.created is None
+
+    assert info.file.created is None
+    # The rest of the section is unaffected - one unavailable field
+    # must not blank out the others.
+    assert info.file.modified is not None
+    assert info.file.size_bytes is not None
 
 
 # --- page geometry -------------------------------------------------------------

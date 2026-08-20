@@ -2165,3 +2165,74 @@ real-display case the cap would otherwise mask, and
 pins the one-way direction.
 
 Full suite after that fix: **539 passed, 1 skipped** (537 + 2 new).
+
+### Creation date on Linux: `statx()` via ctypes (`core/file_times.py`)
+
+The first cut of this dialog reported "(not recorded by this
+filesystem)" for Created on Linux. That diagnosis was wrong, and the
+correction matters for anything else in this project that wants file
+timestamps: **Linux records a birth time, Python just doesn't expose
+it.** `stat(1)` prints `Birth:` for ext4/Btrfs/XFS(v5)/F2FS, but
+`os.stat()` has `st_birthtime` only on macOS and Windows - CPython has
+never adopted the `statx()` syscall that returns it on Linux (still
+true as of 3.12/3.13; the earlier note here claiming "3.13/statx"
+fixes it was wrong). Confirmed on this box: `stat /etc/hostname` shows
+a Birth line while `hasattr(os.stat(...), "st_birthtime")` is False.
+
+`core/file_times.py`'s `birth_time()` calls `statx()` directly through
+`ctypes` - no new dependency, no subprocess, no parsing `stat(1)`
+output. Order: stdlib `st_birthtime` first (so the module retires its
+own code path automatically if CPython ever catches up), then
+`statx(STATX_BTIME)` on Linux, then None.
+
+- **The full `struct statx` is reproduced, not truncated to the fields
+  used.** The kernel writes all 256 bytes, so a short buffer would be
+  memory corruption rather than a harmless simplification;
+  `ctypes.sizeof` is checked against 256 both at load time (refusing to
+  call on mismatch) and in a test.
+- **`None` is a real answer, not only an error.** A filesystem can
+  succeed while leaving the `STATX_BTIME` bit *clear* in the result
+  mask - verified against `/proc/cpuinfo`, which does exactly that, and
+  matches `stat(1)` printing `Birth: -`. Also true of some tmpfs/NFS/
+  FAT mounts and of ext4 made with 128-byte inodes. So "no creation
+  time" and "call failed" are distinguished, and `st_ctime` is still
+  never substituted (it is the inode *change* time).
+- The libc lookup is cached including its negative answer, so a
+  platform that cannot answer doesn't re-`dlopen` per file. glibc has
+  exported `statx` since 2.28 (2018); older glibc, musl without it, and
+  kernels before 4.11 (`ENOSYS`) all degrade to None rather than
+  raising. Never raises.
+- Typing note: `ctypes._NamedFuncPointer` is a typeshed-only name (at
+  runtime `CDLL` builds a per-library `_FuncPtr` class), so it is
+  imported under `TYPE_CHECKING` and used only in PEP 563 annotations.
+
+**Verified against ground truth, not against itself**: our value is
+compared to `stat(1)`'s own Birth field for the same file - an
+independent implementation - because a birth time that is merely *a*
+plausible datetime would pass a self-consistent test while actually
+reporting `st_ctime`, which is usually close enough to look right.
+Matched to the microsecond including timezone. A separate test proves
+the distinction directly: modifying a file moves `st_ctime` but must
+leave the birth time unchanged.
+
+**A real flake found and fixed while writing those tests**: a strict
+`before <= created <= after` assertion fails, because inode timestamps
+come from the kernel's *coarse* tick-based clock and do not order
+strictly against `CLOCK_REALTIME` as `datetime.now()` reads it -
+measured, a freshly created file's birth time landed **1.5ms ahead of
+a `now()` taken after the write**. The test uses a tolerance window and
+says why; confirmed stable over 10 consecutive runs.
+
+Two existing tests had to be rewritten, not just extended - both had
+encoded the wrong diagnosis:
+`test_creation_time_is_reported_where_the_platform_records_one` skipped
+on Linux via `hasattr(..., "st_birthtime")` (it now runs, and skips
+only where the *filesystem* genuinely records nothing), and
+`test_creation_time_is_none_rather_than_a_wrong_value_when_unavailable`
+asserted `created is None` on any platform without `st_birthtime` -
+which the fix makes false on Linux. It now forces the unavailable case
+by monkeypatching instead of waiting for a filesystem that exhibits it.
+
+Full suite: **549 passed, 0 skipped** (539 passed + 1 skipped, plus 9
+new tests) - the `st_birthtime` skip this entry replaces is gone, and
+nothing in the suite skips on Linux any more.

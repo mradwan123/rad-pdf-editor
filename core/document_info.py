@@ -49,6 +49,7 @@ from typing import Literal
 
 import pikepdf
 
+from core.file_times import birth_time
 from core.logging_config import get_logger
 
 log = get_logger(__name__)
@@ -151,11 +152,13 @@ class FileInfo:
     path: Path | None
     exists: bool
     size_bytes: int | None
-    #: Filesystem creation time. None where the platform doesn't
-    #: record one (`st_birthtime` is absent on Linux before Python
-    #: 3.13/statx) - reported as unavailable rather than substituting
-    #: `st_ctime`, which is the inode *change* time and would quietly
-    #: show something that isn't a creation date at all.
+    #: Filesystem creation time, read via `core/file_times.py` - which
+    #: covers Linux too, by calling `statx()` directly, since
+    #: `os.stat()` exposes `st_birthtime` only on macOS/Windows.
+    #: None only where the filesystem genuinely records no birth time
+    #: (procfs, some tmpfs/NFS/FAT, ext4 with 128-byte inodes); never
+    #: substituted with `st_ctime`, which is the inode *change* time
+    #: and would quietly show something that isn't a creation date.
     created: datetime | None
     modified: datetime | None
     #: The controller's dirty flag for this document.
@@ -385,12 +388,11 @@ def _read_file_info(source_path: Path | None, has_unsaved_changes: bool) -> File
         log.info("Could not stat source file", extra={"context": f"{source_path}: {exc}"})
         return FileInfo(source_path, False, None, None, None, has_unsaved_changes)
 
-    birthtime = getattr(stat, "st_birthtime", None)
     return FileInfo(
         path=source_path,
         exists=True,
         size_bytes=stat.st_size,
-        created=_timestamp_to_datetime(birthtime),
+        created=birth_time(source_path, stat),
         modified=_timestamp_to_datetime(stat.st_mtime),
         has_unsaved_changes=has_unsaved_changes,
     )
