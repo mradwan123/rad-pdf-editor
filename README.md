@@ -127,6 +127,18 @@ unit-testable without a display server; `tests/integration/test_gui_smoke.py`
 drives the whole window headlessly (open, apply an op, undo/redo,
 save, close) via `QT_QPA_PLATFORM=offscreen`.
 
+`File > Properties...` (`Ctrl+D`) shows a read-only report on the
+document in the active tab: its metadata, the file on disk (with an
+explicit unsaved-changes line, since everything else describes the
+in-memory working copy), page count/size/orientation/rotation — calling
+out mixed page sizes rather than reporting page 1's as the whole
+document's — and PDF version, fast-web-view, tagged and encryption
+flags with the permission bits. It can be copied to the clipboard as
+plain text, and "Edit Metadata..." hands off to the ordinary Metadata
+tool so any actual edit stays undoable and audited. The reading itself
+lives in `core/document_info.py`, Qt-free and unit-tested without a
+display server.
+
 Pages can be reordered by dragging thumbnails directly in the grid
 (applies a real `ReorderPagesOperation`, undoable like everything
 else), in addition to the typed-permutation dialog under Tools.

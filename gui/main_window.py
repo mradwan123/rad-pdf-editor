@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.document_info import DocumentInfo, read_document_info
 from core.errors import OperationError, PDFEditorError
 from core.logging_config import get_logger
 from core.model.document import DocumentSession
@@ -56,6 +57,7 @@ from core.session.workflow_store import WorkflowStore
 from gui.controller import AppController
 from gui.dialogs.base_tool_dialog import BaseToolDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
+from gui.dialogs.properties_dialog import PropertiesDialog
 from gui.dialogs.run_workflow_dialog import RunWorkflowDialog
 from gui.dialogs.sign_dialog import SignDialog
 from gui.dialogs.tab_placement_dialog import (
@@ -210,6 +212,14 @@ class MainWindow(QMainWindow):
         self.save_as_action.setShortcut("Ctrl+S")
         self.save_as_action.triggered.connect(lambda: self._save_as())
 
+        # Ctrl+D is Acrobat's binding for Document Properties. A plain
+        # QAction, not a tool: it reports, it never touches an
+        # Operation or the undo stack - same reasoning as the View
+        # menu's items (see _build_view_menu).
+        self.properties_action = QAction(self.tr("Propert&ies..."), self)
+        self.properties_action.setShortcut("Ctrl+D")
+        self.properties_action.triggered.connect(self._show_properties)
+
         self.close_action = QAction(self.tr("&Close Tab"), self)
         self.close_action.setShortcut("Ctrl+W")
         self.close_action.triggered.connect(self._close_document)
@@ -244,6 +254,10 @@ class MainWindow(QMainWindow):
         self.recent_files_menu = file_menu.addMenu(self.tr("Open &Recent"))
         self.recent_files_menu.aboutToShow.connect(self._populate_recent_files_menu)
         file_menu.addAction(self.save_as_action)
+        # Its own separator group: a document-info item, not one of the
+        # tab-management items below it.
+        file_menu.addSeparator()
+        file_menu.addAction(self.properties_action)
         file_menu.addSeparator()
         file_menu.addAction(self.close_action)
         file_menu.addAction(self.close_other_tabs_action)
@@ -755,6 +769,58 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(self.tr("Saved to {0}").format(path_str), 5000)
         return True
 
+    # --- document properties -------------------------------------------
+
+    def _read_properties(self, tab: DocumentTab) -> DocumentInfo:
+        """The properties report for `tab`'s document.
+
+        The *working copy* is what gets parsed - the current in-memory
+        edit state, unsaved changes included - while `source_path` is
+        only stat()ed for the "File on disk" section. The dialog says
+        which is which; see core/document_info.py.
+        """
+        return read_document_info(
+            tab.controller.doc.working_path,
+            source_path=tab.controller.doc.source_path,
+            has_unsaved_changes=tab.controller.is_dirty,
+        )
+
+    def _show_properties(self) -> None:
+        """File > Properties... / Ctrl+D. Read-only: no Operation, no
+        undo entry, nothing written."""
+        tab = self.current_tab
+        # The action is disabled with no document open (see
+        # _update_action_state, the same treatment Save As gets). This
+        # guard is the belt to that's braces - _save_as has exactly the
+        # same pair, and returns rather than erroring for the same
+        # reason: an unavailable menu item that somehow fires should do
+        # nothing, not pop an error at a user who didn't ask for one.
+        if tab is None or not tab.controller.is_open:
+            return
+        dialog = PropertiesDialog(
+            self._read_properties(tab),
+            lambda: self._edit_metadata_from_properties(tab),
+            self,
+        )
+        dialog.exec()
+
+    def _edit_metadata_from_properties(self, tab: DocumentTab) -> DocumentInfo | None:
+        """Run the ordinary Metadata tool for `tab`, and hand the
+        Properties dialog a fresh report if it actually changed
+        anything (None means the user cancelled, so nothing to
+        refresh).
+
+        Deliberately goes through `_run_tool` rather than applying a
+        `SetMetadataOperation` directly: that is the one path that puts
+        the edit on the undo stack and in the audit log, and a second
+        hand-rolled apply route would silently skip both.
+        """
+        operations_before = len(tab.controller.doc.operation_log)
+        self._run_tool("set_metadata", TOOL_DIALOGS["set_metadata"])
+        if len(tab.controller.doc.operation_log) == operations_before:
+            return None
+        return self._read_properties(tab)
+
     def _close_document(self) -> None:
         """File > Close Tab / Ctrl+W - closes the current tab."""
         index = self.tab_widget.currentIndex()
@@ -1155,6 +1221,7 @@ class MainWindow(QMainWindow):
         is_open = controller is not None and controller.is_open
         tab_count = self.tab_widget.count()
         self.save_as_action.setEnabled(is_open)
+        self.properties_action.setEnabled(is_open)
         self.close_action.setEnabled(tab_count > 0)
         self.close_other_tabs_action.setEnabled(tab_count > 1)
         self.close_all_tabs_action.setEnabled(tab_count > 0)

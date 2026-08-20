@@ -1983,3 +1983,185 @@ this project's usual convention, to confirm the unparented
 
 Not pushed: CI config changes are the human's call to validate against
 a real GitHub run, which is the only place the Linux fix can be proven.
+
+## Document Properties dialog (File > Properties..., Ctrl+D) — done
+
+A read-only report on the active tab's document: metadata, the file on
+disk, page geometry, PDF technical/security flags. **Not** an
+`Operation`, not in `TOOL_DIALOGS`, not in the CLI — it mutates
+nothing and produces no undo entry, the same scoping the View menu's
+plain `QAction`s already rely on.
+
+**Module placement: `core/document_info.py`, top-level in `core/`.**
+Qt-free (so it unit-tests without a display server, like
+`gui/controller.py`) and engine code (so `mypy --strict` covers it),
+but no existing subpackage owns it: `core/ops/` is "first-party
+plugins, one module per category" per SPEC.md 2 and this is not an
+`Operation` (and it spans metadata + layout + security at once);
+`core/model/` is the frozen framework, and a description of a *file*
+is not a model of an editing session — putting it there would also
+make the frozen-interface package depend on things above it;
+`core/session/` is persistence and nothing here is persisted. That
+leaves the top level, next to `errors.py`/`logging_config.py`.
+
+**`read_document_info()` never raises.** A read-only report that dies
+on one bad field is worse than one that says "unknown": every field is
+individually guarded and an unopenable document comes back as a
+`DocumentInfo` with `read_error` set. Nothing here writes, so there is
+no failure that needs to propagate as a `core/errors.py` exception —
+the "raise only from the hierarchy" rule is satisfied by raising
+nothing.
+
+**Cost, measured not assumed**: catalog/trailer reads plus one
+MediaBox+Rotate read per page — no rendering, no content streams. On a
+2000-page fixture the whole report takes **0.39s**, of which 0.26s is
+`pikepdf.Pdf.open` itself and only **0.02s** is all 2000 page-box
+reads. No per-page scan to avoid; the dialog opens effectively
+instantly.
+
+### Real findings, each verified against a real PDF
+
+- **`pikepdf.PasswordError` is not a `pikepdf.PdfError` subclass** (its
+  base is plain `Exception`, confirmed on pikepdf 10.11) — it needs its
+  own `except` clause or it escapes a `PdfError`-only handler. Not
+  hypothetical: `ProtectOperation` requires a *non-empty user
+  password*, so the working copy of a just-protected document genuinely
+  cannot be reopened, and File > Properties on it hits this path. It
+  degrades to "encrypted: yes, everything else unavailable" with the
+  on-disk section (which needs no parsing) still fully populated.
+- **`Pdf.pdf_version` is the `%PDF-x.y` header only.** PDF 1.4+ lets
+  the catalog's `/Version` override it (used by incremental updates
+  that don't rewrite the header). Confirmed: pikepdf keeps reporting
+  1.3 for a file whose catalog says 1.7, so `_read_pdf_version` applies
+  the override itself or the dialog under-reports.
+- **`Pdf.allow` reports everything as allowed on an *unencrypted*
+  file** — true, but not worth four rows, so permissions are only shown
+  when `is_encrypted`. `Pdf.encryption` additionally raises a bare
+  `KeyError('R')` on an unencrypted document, so it isn't touched.
+- **qpdf repairs a missing or malformed `/MediaBox` while opening.**
+  Tried four ways to build a page whose box can't be read (deleting the
+  key and re-saving, string entries, three entries, a `Name` instead of
+  an array) — every one came back as a default 612x792 letter page, so
+  `Page.mediabox` effectively never fails for a file pikepdf can open
+  at all. `_page_size`'s guard stays as belt-and-braces; `/Rotate` is
+  the one that genuinely can fail (a non-integer survives into the
+  object model and `int()` raises `TypeError`). Pinned by a test so a
+  future pikepdf that stops repairing shows up as a failure rather than
+  a silently wrong page size.
+- **Tagged is `/MarkInfo /Marked` *and* `/StructTreeRoot`** — a
+  `/Marked` flag with no structure tree behind it is a lie some
+  producers tell, and is reported as not tagged.
+- **Sub-point size noise is folded** (`_SIZE_TOLERANCE_PT = 0.5`): real
+  producers emit A4 as both 595.276x841.89 and 595.28x841.89, and
+  calling that "Mixed (2 sizes)" would be technically true and useless.
+
+**Metadata reader/writer agreement**: the six editable fields use the
+same names and docinfo keys `SetMetadataOperation` writes
+(`_FIELD_TO_DOCINFO_KEY`), duplicated rather than imported — `core/ops`
+sits above `core/` architecturally, and reaching for another module's
+private name to save eight lines isn't worth inverting that.
+`test_docinfo_keys_match_the_operation_that_writes_them` pins the two
+together instead. `/Creator` and `/Producer` are read-only extras (that
+operation deliberately doesn't offer them for editing). Dates read back
+as ISO 8601 — the exact format `MetadataDialog` asks the user to type,
+so a value shown here can be pasted straight back into an edit — or as
+the raw `D:...` string verbatim when unparseable, never dropped.
+Absent (`None`) and present-but-blank (`""`) are kept distinct and
+rendered differently ("(not set)" vs "(empty)").
+
+**Working copy vs. file on disk.** The parsed sections describe
+`doc.working_path` (current edit state, unsaved changes included); the
+File on disk section stat()s `doc.source_path` (the untouched
+original). The "Unsaved changes" row exists precisely so
+"Modified: 3 days ago" can't read as "your 20 edits are on disk".
+`test_properties_describes_the_working_copy_not_the_untouched_original`
+deletes a page and asserts the report says 2 pages while the file on
+disk still has 3.
+
+**Creation time is the one field that isn't always obtainable** —
+`st_birthtime` doesn't exist on Linux before Python 3.13/statx (absent
+on this dev box). Reported as "(not recorded by this filesystem)"
+rather than substituting `st_ctime`, which is the inode *change* time
+and would quietly show something that isn't a creation date.
+
+### GUI
+
+`gui/dialogs/properties_dialog.py`'s `PropertiesDialog` is a plain
+`QDialog`, the second one after `TabPlacementDialog` and for a related
+reason: `BaseToolDialog` is an options form + OK/Cancel feeding
+`build_operation()`, and this has no `values()` at all. A single
+`list[(section, [(label, value)])]` feeds both the widgets and the
+clipboard text, so the copied report can't drift from the displayed
+one.
+
+- **Refresh in place, not close-and-reopen**, after Edit Metadata...:
+  the rows are regenerated from one fresh `DocumentInfo`, so there's no
+  flicker and the dialog keeps its position. Edit Metadata... calls
+  back into `MainWindow._edit_metadata_from_properties`, which runs the
+  ordinary `_run_tool("set_metadata", ...)` path — the only path that
+  puts the edit on the undo stack *and* in the audit log — and returns
+  a new report only if `operation_log` actually grew.
+- **A stock `QScrollArea` reports a small fixed `sizeHint` regardless
+  of its content**, and the dialog opened as a **520x125 sliver** with
+  every section scrolled out of sight. Fixed with a `_ReportScrollArea`
+  whose `sizeHint()` follows the widget inside it. A second, subtler
+  half of the same bug: an intermediate container widget's
+  `QWidgetItem` caches a size hint taken before its own children exist
+  and nothing re-validates it while the dialog is unshown, so the outer
+  layout kept reporting 0x0 — the section group boxes now go straight
+  into the layout the dialog is sized from, with no wrapper widget.
+  Both found by measuring, not reasoning.
+- **`QAction.menu()` hands Python a fresh *owning* wrapper in PySide6
+  6.11** — releasing it destroys the real menu, and the next touch
+  raises `RuntimeError: Internal C++ object (QMenu) already deleted`.
+  Hit while writing the File-menu placement test; the fix is
+  `window.findChildren(QMenu)` and matching on `title()`. Worth
+  remembering for any future test that walks the menu tree.
+- No file handles: the inspector reads inside a
+  `with pikepdf.Pdf.open(...)` block and the dialog stores plain data,
+  no `QPdfDocument` anywhere. Verified via `/proc/self/fd` around a
+  real `properties_action.trigger()` (before, during `exec`, after, and
+  after `close_session()` — empty every time, and the session dir wiped
+  cleanly), and pinned by a Linux-only regression test, because the
+  wipe succeeds on Linux whether a handle leaked or not — the exact
+  reason the Sign leak reached Windows CI.
+
+**Verified visually, per this project's standing rule.** Rendered the
+real dialog to PNG via `widget.grab()` under `QT_QPA_PLATFORM=offscreen`
+with the real palette + `styles.qss` applied, and looked at seven
+cases: fully-populated metadata, completely empty metadata, mixed page
+sizes, encrypted-with-restricted-permissions, password-protected,
+a document with no file on disk (Merge), and one opened through the
+real `File > Properties...` action. No label truncated; a deliberately
+long deep path wraps at its `/` separators rather than eliding or
+widening the dialog; the mm/inch pairs keep fixed decimals so the two
+numbers line up (only points drop a trailing `.0`).
+
+Full suite: **537 passed, 1 skipped** (478 baseline + 60 new; the
+`st_birthtime` one skips where the filesystem records no creation
+time), `ruff check .` clean, `mypy core cli gui` clean.
+
+**One flaw the screenshot review above could not have caught, found in
+a follow-up review and fixed**: the dialog asked for ~200px more
+height than it uses. A word-wrapping `QLabel` reports its height at
+its own *preferred* width, so the height Qt derives from the content's
+`sizeHint()` assumes text wrapping that doesn't happen at the wider
+width the dialog really opens at - measured on a two-page fixture, the
+content hints 857px tall at its preferred 276px width but needs only
+704px at the 482px it actually gets, leaving dead space above the
+button row. **This is invisible to an offscreen `grab()`**: the
+virtual screen is 800px tall, so Qt's own two-thirds cap (533px) bites
+first and the scroll bar hides the slack - it only shows on a real
+display tall enough to grant the full hinted height. Fixed with
+`PropertiesDialog.showEvent` -> `_shrink_to_content()`, which resizes
+to `layout.heightForWidth(viewport_width) + chrome`. It only ever
+*shrinks*: the screen cap, the minimum width, and any later user
+resize all still win, and a dialog already shorter than its content
+keeps the scroll area doing its job.
+`test_properties_dialog_leaves_no_dead_space_below_its_content` grows
+the dialog past the offscreen cap first, deliberately recreating the
+real-display case the cap would otherwise mask, and
+`test_properties_dialog_never_grows_past_the_height_it_was_given`
+pins the one-way direction.
+
+Full suite after that fix: **539 passed, 1 skipped** (537 + 2 new).
