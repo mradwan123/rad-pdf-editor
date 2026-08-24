@@ -1,160 +1,159 @@
 # PDF Editor
 
-A local, fully offline, cross-platform PDF editing suite: merge/split,
-edit & sign, security (encrypt/watermark/flatten), compression,
-conversion (Word/Excel/PowerPoint/HTML/JPG in both directions), OCR
-& scan cleanup, and automation via saved Workflows.
+A local, fully offline, cross-platform PDF suite: merge/split, edit &
+sign, security (encrypt/watermark/flatten), compression, conversion
+(Word/Excel/PowerPoint/HTML/JPG in both directions), OCR & scan
+cleanup, and automation via saved Workflows. The GUI ships as **Rad
+PDF Editor**.
 
-Built for handling confidential/regulated documents — no network calls
-anywhere in the codebase.
+Built for handling confidential/regulated documents — **no network
+calls anywhere in the codebase**.
 
 ## Status
 
-**Phase 1 — MVP ops: done.** Core interfaces (`Operation`,
-`DocumentSession`, `Pipeline`, plugin `Registry`) are frozen and
-tested. First-party operations: Merge, Split/Extract, Organize
-(reorder), Rotate, Delete Pages, Compress, Metadata (incl. creation/mod
-dates), Rename, Protect/Unlock, Watermark.
+Phases 1–5 of `docs/SPEC.md`'s roadmap are complete: **37 operations**
+(36 built-in + the shipped example plugin), each registered via
+`discover_and_load`, unit- and integration-tested, and exposed as both
+a CLI subcommand (`python -m cli.main`) and a GUI Tools-menu dialog.
+Phase 6 — turning the batch suite into a real editor — is planned in
+full and started.
 
-**Phase 2 — Forms & layout ops: done (12 of 12).** Crop, Resize, N-up,
-Grayscale (rasterizes affected pages — see `core/ops/layout.py`'s
-module docstring for the tradeoff), Flip, Header/Footer, Bates/page
-numbering, Flatten, Remove Annotations, Fill Form, Sign, Create Forms.
-Fill/Sign are visual/data operations (set AcroForm field values; place
-a signature image at a page/rect), not cryptographic signing — see
-`core/ops/forms.py`'s module docstring. Create Forms authors brand-new
-fields (a different feature from Fill Form, which only edits values of
-fields that already exist); text fields and checkboxes are fully
-supported, radio fields are independent toggles rather than a grouped
-mutually-exclusive set — see `core/ops/forms.py`'s module docstring
-for why grouping isn't supported yet.
+| Phase | Scope | State |
+|---|---|---|
+| 1 | MVP ops — Merge, Extract, Reorder, Rotate, Delete, Compress, Metadata, Rename, Protect/Unlock, Watermark | done (11) |
+| 2 | Forms & layout — Crop, Resize, N-up, Grayscale, Flip, Header/Footer, Bates, Flatten, Remove Annotations, Fill Form, Sign, Create Forms | done (12) |
+| 3 | Conversions — Word/PowerPoint/Excel/HTML/JPG, both directions | done (10) |
+| 4 | Scans — OCR, Deskew, Repair | done (3) |
+| 5 | Workflow builder + save/replay, plugin manifests, installers | done |
+| 6 | Editor — page viewer, on-canvas editing, markup/redaction, background execution, design system | planned; slice 6a done |
 
-**Phase 3 — Conversions: done (10 of 10).** Word/PowerPoint/Excel/
-HTML/JPG, both directions. Dual-engine: LibreOffice headless
-(`soffice --convert-to`, if installed) is the primary engine wherever
-it has a real filter for the pair involved, with a pure-Python
-fallback (python-docx, python-pptx, openpyxl+reportlab, xhtml2pdf)
-used automatically otherwise. The "PDF -> Office format" direction is
-pure-Python only in every case — confirmed by hand against the real
-`soffice` binary that LibreOffice has no working filter chain for
-PDF -> docx/pptx/xlsx at all (a PDF always imports as a Draw document,
-whose export filters don't cover Office formats) — see
-`core/ops/convert_common.py`'s module docstring for the full detail
-and the "external file -> PDF" direction, where LibreOffice genuinely
-is the primary engine. `core/ops/convert_from.py` and
-`core/ops/convert_to.py` split the two directions; each operation
-records which engine actually ran in `describe()`, visible in the
-undo-stack UI and audit log.
+Notable tradeoffs, kept deliberately and documented at the source
+rather than buried here:
 
-**Phase 4 — Scans: done (3 of 3).** OCR, Deskew, Repair. OCR
-(`core/ops/ocr_scan.py`) wraps `ocrmypdf`/Tesseract directly - no
-pure-Python fallback exists for real text recognition, so it's a
-required system prerequisite (unlike LibreOffice in Phase 3), and the
-operation raises a clear error up front if `tesseract` isn't found.
-Deskew is deliberately its own operation, not `ocrmypdf`'s bundled
-`deskew=True` flag - that flag was tried first and found unreliable by
-hand (no standalone mode, and its angle detection silently reported
-`0.000°` on a page hand-rotated by a real 8°, no error). The `deskew`
-package (Hough-transform-based) was verified instead: detected the
-same rotation as `-7.999999999999986°` and, once applied, produced a
-genuinely level page. Repair (`core/ops/repair.py`) is two-tier:
-`pikepdf`'s own structural recovery first (handles common corruption -
-e.g. a truncated file - for free), falling back to Ghostscript's
-`-sDEVICE=pdfwrite` repair pass for corruption pikepdf can't parse at
-all, with Ghostscript's output always re-verified by reopening via
-pikepdf before being trusted (confirmed by hand that `gs` can exit 0
-while only partially recovering a file).
+- **Fill Form / Sign are visual data operations, not cryptographic
+  signing** (`core/ops/forms.py`). Create Forms authors brand-new
+  fields; its `radio` type is an independent toggle, not a grouped
+  mutually-exclusive set.
+- **Grayscale and Deskew rasterize the pages they touch**
+  (`core/ops/layout.py`, `core/ops/ocr_scan.py`) — those pages lose
+  text selection.
+- **Conversion is dual-engine, asymmetrically** (`core/ops/convert_common.py`).
+  *Into* PDF, LibreOffice headless is primary with a pure-Python
+  fallback. *Out of* PDF it is pure-Python always: LibreOffice has no
+  working filter chain for PDF → docx/pptx/xlsx (a PDF always imports
+  as a Draw document). Each operation records which engine actually
+  ran in `describe()`, so fidelity is traceable in the undo stack and
+  audit log.
+- **OCR requires Tesseract** and says so up front instead of degrading
+  silently — no pure-Python fallback for real text recognition exists.
+  Deskew is a separate operation because `ocrmypdf`'s bundled
+  `deskew=True` flag was tried and found unreliable.
+- **Repair is two-tier** (`core/ops/repair.py`): `pikepdf`'s own
+  structural recovery, falling back to a Ghostscript `pdfwrite` pass
+  whose output is always re-verified by reopening it.
 
-**Phase 5 — Workflow builder + save/replay, plugin manifest docs,
-installers: done.** A saved Workflow is just a named `Pipeline`
-(`core/model/pipeline.py`, frozen since Phase 0) serialized to JSON.
-Loading one back into live `Operation`s
-(`core/session/workflow_store.py`'s `deserialize_pipeline`) turned out
-to need no per-operation code at all, because of a convention verified
-by hand across all 36 built-in operations: every
-`Operation.serialize()`'s `"type"` field exactly matches its
-`ToolPlugin.tool_id`, so reconstruction is just
-`registry.get(type).build_operation(**kwargs)`. Saved workflows live
-under `app_data_dir()/workflows/` (one JSON file each) - user data,
-not the source tree, same convention as recent files/audit log/
-autosave. The GUI's Workflows menu ("Build Workflow...", "Run
-Workflow...") and the CLI's `list-workflows`/`run-workflow`
-subcommands are two independent surfaces over the same store. Building
-a workflow reuses every tool's *existing* dialog unchanged (picking a
-step just opens that tool's real dialog); running one is a deliberate
-batch/unattended operation against an external input/output file pair,
-not woven into the currently-open document's live undo stack.
+### Infrastructure
 
-Third-party plugins are real now, not just planned: `plugins/` is
-scanned at startup for `plugin.json` manifests
-(`core/registry/registry.py`) - a simple directory-scan format chosen
-over Python `entry_points` to match this project's small-team/local-
-install distribution model (no pip-publish step needed to add one
-tool). `plugins/example_plugin/` is a complete, real, working example
-("Reverse Page Order") demonstrating the full contract, not just
-illustrative markdown - see `plugins/README.md` for the schema and a
-walkthrough. A malformed manifest or a plugin that fails to load is
-skipped with a logged warning, never a startup crash.
+A private per-session temp directory (`core/session/session_dir.py`)
+holds every working copy — originals are never written — and is
+securely wiped, not just deleted (`core/security/secure_delete.py`).
+Alongside it: an append-only audit log, checkpoint-based autosave/crash
+recovery, recent files, and a defense-in-depth network lockdown
+(`core/security/sandbox.py`). Both the CLI and GUI are wired to all of
+them.
 
-Standalone builds via PyInstaller (`packaging/`) - real build, real
-launch, verified on Linux (`packaging/build.sh`); Windows
-(`packaging/build.ps1`) uses the identical spec but is not yet
-verified on real hardware, see `packaging/README.md`.
+### Workflows and plugins
 
-All 37 operations (36 built-in + the shipped example plugin) are
-registered via `discover_and_load`, covered by unit + integration
-tests, and exposed as both CLI subcommands (`python -m cli.main`) and
-GUI Tools-menu dialogs.
+A saved Workflow is a named `Pipeline` serialized to JSON under
+`app_data_dir()/workflows/`. Loading one back needs no per-operation
+code: every `Operation.serialize()`'s `"type"` matches its
+`ToolPlugin.tool_id`, so reconstruction is
+`registry.get(type).build_operation(**kwargs)`. The GUI's Workflows
+menu and the CLI's `list-workflows` / `run-workflow` are two surfaces
+over the same store. Building a workflow reuses each tool's real
+dialog; running one is an unattended batch pass over an external
+input/output pair, deliberately not woven into the open document's
+undo stack.
 
-Session/security infrastructure is in place: a private per-session
-temp directory (`core/session/session_dir.py`), secure multi-pass
-delete (`core/security/secure_delete.py`), an append-only audit log
-(`core/session/audit_log.py`), a checkpoint-based autosave/crash-
-recovery journal (`core/session/autosave.py`), and a defense-in-depth
-network lockdown (`core/security/sandbox.py`). Both the CLI and GUI
-are wired to the session dir, network lockdown, and audit log.
+Third-party plugins are a `plugin.json` directory scan of `plugins/`
+(chosen over Python `entry_points` — no pip-publish step to add one
+tool). `plugins/example_plugin/` is a complete working example; a
+malformed manifest is skipped with a warning, never a startup crash.
+See [`plugins/README.md`](plugins/README.md).
 
-A first working GUI exists (`python -m gui.main`), branded as **Rad
-PDF Editor**: PySide6 + Qt Fusion style, a dark silver/gray/black theme
-(`gui/palette.py` + `gui/styles.qss` — SPEC.md 6.2's shared stylesheet),
-a programmatically-drawn app icon/logo (`gui/resources.py`, no binary
-image assets checked in), a branded empty-state welcome screen, a
-thumbnail page grid (rendered via `QtPdf`), Open/Save As/Close,
-Undo/Redo, and a Tools menu with a dialog for each of the 36 built-in
-operations, all subclassing a shared `BaseToolDialog` (SPEC.md 6.2).
-`gui/controller.py` holds the Qt-free session/document glue so it's
-unit-testable without a display server; `tests/integration/test_gui_smoke.py`
-drives the whole window headlessly (open, apply an op, undo/redo,
-save, close) via `QT_QPA_PLATFORM=offscreen`.
+Standalone builds via PyInstaller (`packaging/`) — built and launched
+on Linux; the Windows/macOS specs are identical but unverified on real
+hardware, see [`packaging/README.md`](packaging/README.md).
 
-`File > Properties...` (`Ctrl+D`) shows a read-only report on the
-document in the active tab: its metadata, the file on disk (with an
-explicit unsaved-changes line, since everything else describes the
-in-memory working copy), page count/size/orientation/rotation — calling
-out mixed page sizes rather than reporting page 1's as the whole
-document's — and PDF version, fast-web-view, tagged and encryption
-flags with the permission bits. It can be copied to the clipboard as
-plain text, and "Edit Metadata..." hands off to the ordinary Metadata
-tool so any actual edit stays undoable and audited. The reading itself
-lives in `core/document_info.py`, Qt-free and unit-tested without a
-display server.
+## The GUI
 
-Pages can be reordered by dragging thumbnails directly in the grid
-(applies a real `ReorderPagesOperation`, undoable like everything
-else), in addition to the typed-permutation dialog under Tools.
+`python -m gui.main` — PySide6, Qt Fusion, a dark theme
+(`gui/palette.py` + `gui/styles.qss`) and a programmatically-drawn
+icon/logo (no binary assets checked in).
 
-Several documents can be open at once, in tabs. Each tab is a fully
-independent editing session — its own private working copy, undo/redo
-stack and unsaved-changes state (a `•` on the tab label) — so an
-operation in one document can never reach another. Tabs are closable
-and drag-reorderable, with `Ctrl+W` to close and `Ctrl+Tab` /
-`Ctrl+Shift+Tab` to cycle; closing a tab securely wipes that
-document's working files immediately rather than waiting for app exit.
-Opening a document asks whether to open it in a new tab or replace the
-current one. If the app ever dies unexpectedly, the next launch offers
-to restore the tab you were last working in.
+- **Multi-document tabs.** Each tab is a fully independent editing
+  session — its own working copy, undo/redo stack and dirty marker
+  (`•`) — so an operation in one document can never reach another.
+  Closable, drag-reorderable, `Ctrl+W` to close, `Ctrl+Tab` /
+  `Ctrl+Shift+Tab` to cycle. Closing a tab wipes that document's
+  working files immediately. Opening asks new tab vs. replace current.
+- **Thumbnail grid** per tab, with drag-to-reorder pages (a real
+  undoable `ReorderPagesOperation`) and a right-click menu for
+  rotate/delete.
+- **View menu**: thumbnail zoom from 60px up to 720px (3×, re-rendered
+  from the PDF at each step, not upscaled), toolbar/status-bar
+  toggles, full screen.
+- **Document Properties** (`File > Properties...`, `Ctrl+D`): a
+  read-only report on the active tab's document — its metadata, the
+  file on disk (with an explicit unsaved-changes line, since
+  everything else describes the in-memory working copy), page
+  count/size/orientation, calling out mixed page sizes rather than
+  reporting page 1's as the whole document's, and PDF
+  version/fast-web-view/tagged/encryption with the permission bits.
+  Copies to the clipboard as plain text; "Edit Metadata..." hands off
+  to the ordinary Metadata tool so any real edit stays undoable and
+  audited. The reading is Qt-free in `core/document_info.py`;
+  creation time comes from `core/file_times.py`, which calls `statx()`
+  on Linux because `os.stat()` exposes `st_birthtime` only on
+  macOS/Windows.
+- **Interactive signature placement**: the Sign dialog renders the
+  target page and lets you drag and corner-resize the signature image
+  on it, two-way bound to the numeric rect fields. The preview mirrors
+  what PyMuPDF will actually produce, including its
+  square-image aspect-ratio quirk.
+- **Crash recovery**: the next launch offers to restore the tab you
+  were last working in.
+- 36 tool dialogs, grouped into eight Tools submenus, all sharing
+  `BaseToolDialog`. `gui/controller.py` keeps the session/document
+  glue Qt-free and unit-testable without a display server;
+  `tests/integration/test_gui_smoke.py` drives the real window
+  headlessly under `QT_QPA_PLATFORM=offscreen`.
 
-All five phases from `docs/SPEC.md`'s roadmap are now complete.
+## Phase 6 — Editor (in progress)
+
+Phases 1–5 built 36 whole-document/whole-page *transforms* behind a
+thumbnail grid. There is still no page viewer, no text selection, no
+find, no annotation and no redaction — that gap is Phase 6, and it is
+GUI work **plus a new class of `Operation`**. The frozen interfaces
+(`Operation`, `DocumentSession`, `Pipeline`, `ToolPlugin`) are not
+touched; Phase 6 adds one optional additive method.
+
+[`docs/GUI_PLAN.md`](docs/GUI_PLAN.md) is the design record: thirteen
+locked decisions, the sequencing (6a–6h), and the risks. Two library
+findings shaped it, both verified against the installed versions:
+QtPdf's search/selection/outline/async-render model classes all work
+without the `QPdfView` widget (so a custom `QGraphicsView` canvas gets
+editable overlays *and* real text selection), and PyMuPDF already
+covers every annotation type plus `apply_redactions` — true redaction
+that removes content, not a black rectangle over extractable text.
+
+**6a (decompose `gui/main_window.py`) is done**: 1174 → 541 lines as a
+pure move into `gui/actions.py`, `tab_manager.py`, `tool_runner.py`,
+`rendering.py` and `window_parts.py`, with zero test changes. It lives
+on the `worktree-gui-editor-plan` branch and is **not yet merged to
+`main`**. Slices 6b–6h (async rendering, page viewer, background
+execution, markup/insert, redaction, design system, text editing) are
+not started.
 
 ## Setup
 
@@ -164,38 +163,38 @@ source .venv/bin/activate   # .venv\Scripts\activate on Windows
 pip install -e ".[dev]"
 ```
 
-**Optional**: install [LibreOffice](https://www.libreoffice.org/) for
-higher-fidelity Word/PowerPoint/Excel/HTML <-> PDF conversion (Phase
-3). It's a system-level install, not a pip dependency — its absence
-just means every conversion op automatically uses its pure-Python
-fallback instead (see the Phase 3 status note above).
+System prerequisites, all optional except where noted:
 
-**Required for OCR**: install `tesseract-ocr` (e.g. `apt install
-tesseract-ocr` on Debian/Ubuntu) for the OCR tool (Phase 4). Unlike
-LibreOffice, there is no pure-Python fallback for real text
-recognition — the OCR operation raises a clear error if it's missing,
-rather than degrading silently. Deskew and Repair don't need it.
-
-**Optional for Repair**: Ghostscript (usually already present on
-Linux/macOS; `gs` on `PATH`) is used as Repair's fallback engine for
-corruption `pikepdf`'s own structural recovery can't handle. Most
-corrupt PDFs are recovered by `pikepdf` alone without needing it.
+| Tool | Needed for | If missing |
+|---|---|---|
+| [LibreOffice](https://www.libreoffice.org/) | higher-fidelity Office/HTML → PDF conversion | pure-Python fallback runs automatically |
+| `tesseract-ocr` | **required** by the OCR tool | OCR raises a clear error; Deskew and Repair are unaffected |
+| Ghostscript (`gs`) | Repair's second-tier engine | most corrupt PDFs are recovered by `pikepdf` alone |
 
 ## Development
 
 ```bash
 ruff check .          # lint
-mypy core cli gui     # strict type-check on core/cli, relaxed on gui
-pytest                # tests (set QT_QPA_PLATFORM=offscreen if headless)
+mypy core cli gui     # strict on core/cli, relaxed on gui
+pytest                # set QT_QPA_PLATFORM=offscreen if headless
 ```
+
+Full suite: **478 passing**. CI (`.github/workflows/ci.yml`) runs those
+three commands on Linux, macOS and Windows; the Linux leg installs PySide6's
+native library dependencies (`libegl1`, `libgl1`, `libxkbcommon0`,
+`libfontconfig1`, `libdbus-1-3`) — the offscreen platform plugin needs
+those five, and nothing from the xcb stack.
 
 ## Documentation
 
-- [`docs/SPEC.md`](docs/SPEC.md) — full technical specification,
-  architecture, agent/workstream breakdown, and roadmap.
-- [`CLAUDE.md`](CLAUDE.md) — quick-reference conventions for Claude
-  Code sessions working in this repo.
-- [`plugins/README.md`](plugins/README.md) — third-party plugin
-  manifest format and a walkthrough building one.
-- [`packaging/README.md`](packaging/README.md) — building a standalone
-  installer, and its per-OS verification status.
+- [`docs/SPEC.md`](docs/SPEC.md) — technical specification,
+  architecture, workstream breakdown, roadmap.
+- [`docs/GUI_PLAN.md`](docs/GUI_PLAN.md) — the Phase 6 design record
+  (lives on the `worktree-gui-editor-plan` branch until it merges).
+- [`CLAUDE.md`](CLAUDE.md) — conventions and the full engineering
+  log: every non-obvious finding, tradeoff and bug behind the summary
+  above.
+- [`plugins/README.md`](plugins/README.md) — plugin manifest format
+  and a walkthrough.
+- [`packaging/README.md`](packaging/README.md) — standalone builds and
+  their per-OS verification status.
