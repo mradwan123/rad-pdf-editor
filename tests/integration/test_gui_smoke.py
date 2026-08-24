@@ -31,6 +31,8 @@ from gui.dialogs.crop_dialog import CropDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
 from gui.dialogs.merge_dialog import MergeDialog
 from gui.dialogs.metadata_dialog import MetadataDialog
+from gui.dialogs.pdf_to_docx_dialog import PdfToDocxDialog
+from gui.dialogs.pdf_to_jpg_dialog import PdfToJpgDialog
 from gui.dialogs.properties_dialog import PropertiesDialog
 from gui.dialogs.rotate_dialog import RotateDialog
 from gui.dialogs.run_workflow_dialog import RunWorkflowDialog
@@ -40,6 +42,7 @@ from gui.dialogs.tab_placement_dialog import (
     PLACEMENT_REPLACE_CURRENT,
     TabPlacementDialog,
 )
+from gui.dialogs.tool_dialog_registry import TOOL_DIALOGS
 from gui.dialogs.workflow_builder_dialog import WorkflowBuilderDialog
 from gui.document_tab import DocumentTab
 from gui.main_window import MainWindow
@@ -2443,3 +2446,180 @@ def test_properties_holds_no_handle_on_the_working_file(
     tab.controller.close_session()
     assert not session_dir.exists()
     window.close()
+
+
+# --- PDF -> external-format exports -----------------------------------------
+#
+# These five conversions used to be applied to the tab like any other
+# operation, which replaced its PDF working file with a .docx/.pptx/
+# .xlsx/.html/.jpg. The thumbnail grid cannot render one, so the window
+# went blank and the document appeared to vanish - and the converted
+# file, left in the private session dir, was securely wiped when the
+# tab closed. They are exports now: the file goes where the user asks,
+# and the open document is untouched.
+
+
+_EXPORT_CASES = [
+    ("pdf_to_docx", {}, ".docx"),
+    ("pdf_to_pptx", {}, ".pptx"),
+    ("pdf_to_xlsx", {}, ".xlsx"),
+    ("pdf_to_html", {}, ".html"),
+    ("pdf_to_jpg", {"page": 1}, ".jpg"),
+]
+
+
+@pytest.mark.parametrize(("tool_id", "values", "suffix"), _EXPORT_CASES)
+def test_converting_from_pdf_writes_a_file_and_leaves_the_document_open(
+    qapp: QApplication,
+    tmp_path: Path,
+    tool_id: str,
+    values: dict[str, Any],
+    suffix: str,
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    destination = tmp_path / f"exported{suffix}"
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    dialog_cls = TOOL_DIALOGS[tool_id]
+
+    with (
+        patch.object(dialog_cls, "exec", lambda self: QDialog.DialogCode.Accepted),
+        patch.object(dialog_cls, "values", lambda self: values),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=(str(destination), "")),
+    ):
+        window._run_tool(tool_id, dialog_cls)
+
+    # The converted file is where the user asked for it, and is real.
+    assert destination.exists()
+    assert destination.stat().st_size > 0
+    # The window still shows the PDF - this is the blank-screen symptom.
+    assert tab.thumbnail_list.count() == 2
+    working_path = tab.controller.doc.working_path
+    assert working_path is not None
+    assert working_path.suffix == ".pdf"
+    # An export is not an edit: nothing to undo, nothing unsaved.
+    assert tab.controller.doc.operation_log == []
+    assert not tab.controller.is_dirty
+    assert not window.undo_action.isEnabled()
+    _force_close(window)
+
+
+def test_an_export_survives_the_session_being_wiped(qapp: QApplication, tmp_path: Path) -> None:
+    """The other half of the bug: the converted file used to live only
+    in the private session dir, which is securely wiped when the tab
+    closes - so the user's Word file was destroyed rather than
+    delivered. It has to outlive the session that produced it."""
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    destination = tmp_path / "exported.docx"
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    working_path = tab.controller.doc.working_path
+    assert working_path is not None
+    session_dir = working_path.parent
+
+    with (
+        patch.object(PdfToDocxDialog, "exec", lambda self: QDialog.DialogCode.Accepted),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=(str(destination), "")),
+    ):
+        window._run_tool("pdf_to_docx", PdfToDocxDialog)
+
+    _force_close(window)
+
+    assert not session_dir.exists(), "the tab's session dir should have been wiped"
+    assert destination.exists(), "the exported file was wiped along with the session"
+    assert destination.stat().st_size > 0
+
+
+def test_cancelling_the_export_destination_changes_nothing(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+
+    with (
+        patch.object(PdfToDocxDialog, "exec", lambda self: QDialog.DialogCode.Accepted),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=("", "")),
+    ):
+        window._run_tool("pdf_to_docx", PdfToDocxDialog)
+
+    assert tab.thumbnail_list.count() == 2
+    assert tab.controller.doc.operation_log == []
+    assert not tab.controller.is_dirty
+    _force_close(window)
+
+
+def test_an_export_is_recorded_in_the_audit_log(qapp: QApplication, tmp_path: Path) -> None:
+    """Every other path that applies an Operation records to the audit
+    trail, and an export writes a confidential document out to a new
+    file - exactly what the trail exists for."""
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    destination = tmp_path / "exported.docx"
+    window = MainWindow()
+    _open_tab(window, src)
+    entries_before = len(window.audit_log.read_all())
+
+    with (
+        patch.object(PdfToDocxDialog, "exec", lambda self: QDialog.DialogCode.Accepted),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=(str(destination), "")),
+    ):
+        window._run_tool("pdf_to_docx", PdfToDocxDialog)
+
+    entries = window.audit_log.read_all()
+    assert len(entries) == entries_before + 1
+    assert str(destination) in str(entries[-1])
+    _force_close(window)
+
+
+def test_an_export_extension_is_added_only_when_the_user_typed_none(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    _open_tab(window, src)
+    bare = tmp_path / "no_extension"
+
+    with (
+        patch.object(PdfToDocxDialog, "exec", lambda self: QDialog.DialogCode.Accepted),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=(str(bare), "")),
+    ):
+        window._run_tool("pdf_to_docx", PdfToDocxDialog)
+
+    assert (tmp_path / "no_extension.docx").exists()
+    assert not bare.exists()
+
+    # An extension the user chose deliberately is left alone.
+    chosen = tmp_path / "report.doc"
+    with (
+        patch.object(PdfToDocxDialog, "exec", lambda self: QDialog.DialogCode.Accepted),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=(str(chosen), "")),
+    ):
+        window._run_tool("pdf_to_docx", PdfToDocxDialog)
+
+    assert chosen.exists()
+    _force_close(window)
+
+
+def test_a_failing_export_reports_the_error_and_leaves_the_document_open(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    destination = tmp_path / "out.jpg"
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    errors: list[str] = []
+
+    with (
+        patch.object(PdfToJpgDialog, "exec", lambda self: QDialog.DialogCode.Accepted),
+        # Page 99 of a 2-page document: rejected by the operation itself.
+        patch.object(PdfToJpgDialog, "values", lambda self: {"page": 99}),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=(str(destination), "")),
+        patch.object(MainWindow, "_show_error", lambda self, exc: errors.append(str(exc))),
+    ):
+        window._run_tool("pdf_to_jpg", PdfToJpgDialog)
+
+    assert errors, "a failed export must report the error"
+    assert not destination.exists()
+    assert tab.thumbnail_list.count() == 2
+    assert tab.controller.doc.operation_log == []
+    _force_close(window)

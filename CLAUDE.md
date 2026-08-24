@@ -2236,3 +2236,68 @@ by monkeypatching instead of waiting for a filesystem that exhibits it.
 Full suite: **549 passed, 0 skipped** (539 passed + 1 skipped, plus 9
 new tests) - the `st_birthtime` skip this entry replaces is gone, and
 nothing in the suite skips on Linux any more.
+
+## PDF -> external-format conversions blanked the window (fixed)
+
+User report: "convert pdf to word gives a blank screen." Reproduced
+immediately against the real `MainWindow`, and it affected **all five**
+PDF -> X conversions (`pdf_to_docx`, `pdf_to_pptx`, `pdf_to_xlsx`,
+`pdf_to_html`, `pdf_to_jpg`), each confirmed by running it rather than
+inferred from shared code: thumbnails went 2 -> 0, status bar "0
+page(s)", log line `Could not load PDF for thumbnail rendering`.
+
+**Root cause.** Every one of these operations ends
+`return next_session(doc, out_path)` where `out_path` is a
+`.docx`/`.pptx`/`.xlsx`/`.html`/`.jpg` (`core/ops/convert_from.py`).
+That is the *correct* shape for the CLI (which copies the result
+straight to `-o`) and for a Workflow step. But `_run_tool` handed it to
+`AppController.apply_operation` like any other tool, so the tab's
+working file stopped being a PDF, and `_render_thumbnails` -
+`QPdfDocument` - had nothing renderable. The document appeared to
+vanish.
+
+**The worse half, which the report hadn't reached yet**: the converted
+file was written into the private session temp dir and surfaced
+nowhere, so it was **securely wiped when the tab closed**. The
+behaviour was "blank the window, then destroy the user's Word file."
+
+**Fix, in the GUI only - no Operation was touched.** These five are
+*exports*: they produce a file to keep, not a new editing state.
+`_EXPORT_TOOLS` (`gui/main_window.py`) maps each tool_id to its
+extension and file-dialog filter, and `_run_tool` routes them to the
+new `_export_document()` instead of `apply_operation`. That runs the
+conversion against a throwaway `SessionTempDir` seeded with a copy of
+the working PDF - the same isolation `_run_workflow` already uses - and
+copies the result to a path the user picks via `QFileDialog`.
+
+Consequences, all deliberate:
+- The tab's `AppController`, document, undo stack and dirty flag are
+  never touched. **No undo entry**: converting to Word does not modify
+  the PDF, so there is nothing to undo.
+- The audit log still records it, for the same reason `_run_workflow`
+  does - an export writes a confidential document out to a new file,
+  which is precisely what the trail is for.
+- A cancelled destination dialog is a clean no-op.
+- The extension is appended only when the user typed none; one they
+  chose deliberately (`report.doc`) is respected.
+- CLI behaviour is entirely unchanged, as is using these ops as
+  Workflow steps.
+
+**Verified against real output, not just "didn't raise"**: each of the
+five exported files was opened with its own library - `python-docx`
+(both pages' text present), `python-pptx` (2 slides, an image shape
+each), `openpyxl`, the raw HTML text, and PIL (a real 834x1112 JPEG).
+The window was also grabbed to PNG after a conversion and looked at:
+both page thumbnails still rendered, tab not dirty, Undo greyed out,
+status bar reading "Exported to ...".
+
+**The regression tests were confirmed to actually catch the bug**, not
+merely to pass: with the `_EXPORT_TOOLS` branch temporarily disabled,
+9 of the 10 new tests fail. (The tenth is the failed-export error-path
+test, which was correct before and after - worth knowing rather than
+assuming all 10 were load-bearing.) One test asserts the thing that
+makes this more than cosmetic: the exported file still exists *after*
+`_force_close` wipes the session dir it was produced in.
+
+Full suite: **559 passed** (549 + 10 new), `ruff check .` clean,
+`mypy core cli gui` clean.

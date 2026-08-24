@@ -73,6 +73,23 @@ from gui.resources import build_logo_pixmap
 log = get_logger(__name__)
 
 _APP_NAME = "Rad PDF Editor"
+
+#: PDF -> external-format conversions, mapped to the extension and
+#: file-dialog filter of what they produce. These are *exports*: the
+#: result is a file the user keeps, not a new editing state for the
+#: open tab, so `_run_tool` routes them to `_export_document` instead
+#: of `AppController.apply_operation`. Applying one to a tab replaced
+#: its PDF with a file the thumbnail grid cannot render - a blank
+#: window, and the converted file wiped with the session. The
+#: operations themselves are unchanged: their PDF-in/file-out shape is
+#: correct for the CLI and for Workflow steps.
+_EXPORT_TOOLS: dict[str, tuple[str, str]] = {
+    "pdf_to_docx": (".docx", "Word document (*.docx)"),
+    "pdf_to_pptx": (".pptx", "PowerPoint presentation (*.pptx)"),
+    "pdf_to_xlsx": (".xlsx", "Excel workbook (*.xlsx)"),
+    "pdf_to_html": (".html", "HTML page (*.html)"),
+    "pdf_to_jpg": (".jpg", "JPEG image (*.jpg)"),
+}
 _THUMBNAIL_SIZE = QSize(120, 160)
 # View > Thumbnail zoom: width-driven (height is derived from
 # _THUMBNAIL_SIZE's own aspect ratio, recomputed from the *original*
@@ -958,6 +975,71 @@ class MainWindow(QMainWindow):
 
     # --- tools ---------------------------------------------------------------
 
+    def _export_document(self, tool_id: str, values: dict[str, Any], tab: DocumentTab) -> None:
+        """Run a PDF -> external-format conversion as an **export**:
+        write the result to a file the user picks, and leave the open
+        document exactly as it was.
+
+        These five operations return a `DocumentSession` whose
+        `working_path` is a .docx/.pptx/.xlsx/.html/.jpg, because that
+        is the right shape for the CLI (which writes it straight to
+        `-o`) and for a Workflow step. Applying one to a *tab*,
+        though, replaced that tab's PDF with a file the thumbnail
+        grid cannot render - the window went blank, the document
+        appeared to vanish, and the converted file was left in the
+        private session dir to be securely wiped when the tab closed.
+        The user's Word file was destroyed, not delivered.
+
+        So the conversion runs against a throwaway `SessionTempDir`
+        seeded with a copy of the working PDF, exactly as
+        `_run_workflow` does, and the tab's own AppController,
+        document and undo stack are never touched. There is
+        deliberately no undo entry: converting to Word does not modify
+        the PDF, so there is nothing to undo. The audit log still
+        records it, for the same reason `_run_workflow` does.
+        """
+        suffix, filter_text = _EXPORT_TOOLS[tool_id]
+        working_path = tab.controller.doc.working_path
+        assert working_path is not None  # guaranteed by _run_tool's is_open check
+
+        source_path = tab.controller.doc.source_path
+        directory = source_path.parent if source_path is not None else Path.home()
+        suggestion = directory / (Path(tab.document_name()).stem + suffix)
+        path_str, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            self.tr("Export As"),
+            str(suggestion),
+            self.tr(filter_text),
+            options=QFileDialog.Option.DontUseNativeDialog,
+        )
+        if not path_str:
+            return
+        target = Path(path_str)
+        if not target.suffix:
+            # Only when the user typed no extension at all - an
+            # explicit one they chose themselves is left alone.
+            target = target.with_suffix(suffix)
+
+        try:
+            with self._busy_cursor():
+                operation = self.registry.get(tool_id).build_operation(**values)
+                with SessionTempDir() as session:
+                    scratch = session.path / f"working{working_path.suffix}"
+                    shutil.copyfile(working_path, scratch)
+                    # source_path is carried over so the operation sees
+                    # the same document identity it would in the tab.
+                    result = operation.apply(
+                        DocumentSession(working_path=scratch, source_path=source_path)
+                    )
+                    if result.working_path is None:  # pragma: no cover - defensive
+                        raise OperationError("The conversion produced no output file.")
+                    shutil.copyfile(result.working_path, target)
+                    self.audit_log.record_operation(operation, document_label=str(target))
+        except PDFEditorError as exc:
+            self._show_error(exc)
+            return
+        self.statusBar().showMessage(self.tr("Exported to {0}").format(target), 5000)
+
     def _run_tool(self, tool_id: str, dialog_cls: DialogFactory) -> None:
         tab = self.current_tab
         if tool_id != "merge" and (tab is None or not tab.controller.is_open):
@@ -992,6 +1074,13 @@ class MainWindow(QMainWindow):
         # on every path out, rather than left to destruction order.
         try:
             if dialog.exec() != BaseToolDialog.DialogCode.Accepted:
+                return
+            if tool_id in _EXPORT_TOOLS:
+                # Produces a file to keep, not a new state for this
+                # tab - see _export_document for why applying one of
+                # these to the tab blanked the window.
+                assert tab is not None  # export tools all require an open document
+                self._export_document(tool_id, dialog.values(), tab)
                 return
             created_tab = tab is None
             if created_tab:
