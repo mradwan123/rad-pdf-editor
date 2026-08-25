@@ -8,7 +8,9 @@ server (set here, defensively, in case the environment hasn't already
 
 from __future__ import annotations
 
+import contextlib
 import os
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -18,7 +20,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pikepdf
 import pytest
 from PySide6.QtCore import QModelIndex, QPoint, QSize, Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QGuiApplication, QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox
 
@@ -28,6 +30,10 @@ from gui.dialogs.create_form_field_dialog import CreateFormFieldDialog
 from gui.dialogs.crop_dialog import CropDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
 from gui.dialogs.merge_dialog import MergeDialog
+from gui.dialogs.metadata_dialog import MetadataDialog
+from gui.dialogs.pdf_to_docx_dialog import PdfToDocxDialog
+from gui.dialogs.pdf_to_jpg_dialog import PdfToJpgDialog
+from gui.dialogs.properties_dialog import PropertiesDialog
 from gui.dialogs.rotate_dialog import RotateDialog
 from gui.dialogs.run_workflow_dialog import RunWorkflowDialog
 from gui.dialogs.sign_dialog import SignDialog
@@ -36,6 +42,7 @@ from gui.dialogs.tab_placement_dialog import (
     PLACEMENT_REPLACE_CURRENT,
     TabPlacementDialog,
 )
+from gui.dialogs.tool_dialog_registry import TOOL_DIALOGS
 from gui.dialogs.workflow_builder_dialog import WorkflowBuilderDialog
 from gui.document_tab import DocumentTab
 from gui.main_window import MainWindow
@@ -2130,3 +2137,494 @@ def test_a_clean_shutdown_leaves_nothing_to_recover(qapp: QApplication, tmp_path
         assert not next_launch.restore_autosaved_session()
     mock_question.assert_not_called()
     next_launch.close()
+
+
+# --- File > Properties... ---------------------------------------------------
+#
+# PropertiesDialog is a plain Python QDialog subclass (not a
+# BaseToolDialog, and deliberately not a QMessageBox), so
+# patch.object(PropertiesDialog, "exec", ...) genuinely intercepts -
+# see CLAUDE.md on compiled .exec methods.
+
+
+def test_properties_action_is_disabled_until_a_document_is_open(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    window = MainWindow()
+    assert not window.properties_action.isEnabled()
+
+    _open_tab(window, src)
+    assert window.properties_action.isEnabled()
+
+    window._close_document()
+    assert not window.properties_action.isEnabled()
+    window.close()
+
+
+def test_properties_action_with_no_document_does_nothing_rather_than_crashing(
+    qapp: QApplication,
+) -> None:
+    window = MainWindow()
+    with patch.object(PropertiesDialog, "exec") as mock_exec:
+        window.properties_action.trigger()
+    mock_exec.assert_not_called()
+    window.close()
+
+
+def test_properties_lives_in_the_file_menu_with_the_acrobat_shortcut(
+    qapp: QApplication,
+) -> None:
+    window = MainWindow()
+    # findChildren, not `action.menu()` off the menu bar: in PySide6
+    # 6.11 each `QAction.menu()` call hands Python a fresh owning
+    # wrapper, and releasing it destroys the real menu - the next touch
+    # then raises "Internal C++ object (QMenu) already deleted". Hit
+    # for real while writing this test, not a precaution.
+    file_menu = next(
+        menu for menu in window.findChildren(QMenu) if menu.title().replace("&", "") == "File"
+    )
+    actions = file_menu.actions()
+    assert window.properties_action in actions
+    assert window.properties_action.shortcut() == QKeySequence("Ctrl+D")
+
+    # Straight after Save As, and fenced off by separators from the
+    # tab-management group below it.
+    index = actions.index(window.properties_action)
+    assert actions[index - 1].isSeparator()
+    assert actions[index + 1].isSeparator()
+    save_index = actions.index(window.save_as_action)
+    assert save_index == index - 2
+    window.close()
+
+
+def test_properties_reports_the_open_documents_real_geometry_and_metadata(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 3)
+    with pikepdf.Pdf.open(src, allow_overwriting_input=True) as pdf:
+        pdf.docinfo["/Title"] = "Quarterly Report"
+        pdf.save(src)
+
+    window = MainWindow()
+    tab = _open_tab(window, src)
+
+    info = window._read_properties(tab)
+    assert info.metadata is not None
+    assert info.metadata.title == "Quarterly Report"
+    assert info.geometry is not None
+    assert info.geometry.page_count == 3
+    assert info.file.path == src
+    assert info.file.has_unsaved_changes is False
+    window.close()
+
+
+def test_properties_describes_the_working_copy_not_the_untouched_original(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """The whole point of the "unsaved changes" row: after deleting a
+    page, the report must show 2 pages (the in-memory edit state) while
+    still pointing at the 3-page file on disk, and say so."""
+    from core.ops.organize import DeletePagesOperation
+
+    src = _make_pdf(tmp_path / "src.pdf", 3)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    tab.controller.apply_operation(DeletePagesOperation(pages=[3]))
+
+    info = window._read_properties(tab)
+    assert info.geometry is not None
+    assert info.geometry.page_count == 2
+    assert info.file.has_unsaved_changes is True
+    with pikepdf.Pdf.open(src) as pdf:
+        assert len(pdf.pages) == 3  # the original really is untouched
+
+    dialog = PropertiesDialog(info)
+    assert "Unsaved changes" in dialog.report_text()
+    assert "3" not in dialog.report_text().split("Pages:")[1].splitlines()[0]
+    _force_close(window)
+
+
+def test_properties_copy_to_clipboard_puts_the_whole_report_on_the_clipboard(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    with pikepdf.Pdf.open(src, allow_overwriting_input=True) as pdf:
+        pdf.docinfo["/Author"] = "A. Author"
+        pdf.save(src)
+
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    dialog = PropertiesDialog(window._read_properties(tab))
+
+    QGuiApplication.clipboard().clear()
+    dialog.button_for_copy().click()  # the real button, so the real handler runs
+    copied = QGuiApplication.clipboard().text()
+
+    assert copied == dialog.report_text()
+    # A labelled report, not a JSON/repr dump.
+    assert "Document metadata" in copied
+    assert "Author:" in copied
+    assert "A. Author" in copied
+    assert "Pages:" in copied
+    assert str(src) in copied
+    assert not copied.lstrip().startswith(("{", "["))
+    window.close()
+
+
+def test_properties_edit_metadata_goes_through_the_real_undoable_tool_path(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Editing from the Properties dialog must land in the undo stack
+    and the audit log exactly as Tools > Metadata does - it runs the
+    same _run_tool path, not a second hand-rolled apply route - and the
+    dialog must then refresh instead of showing the old values."""
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    audit_entries_before = len(window.audit_log.read_all())
+
+    dialog = PropertiesDialog(
+        window._read_properties(tab),
+        lambda: window._edit_metadata_from_properties(tab),
+    )
+    assert dialog.edit_metadata_button.isEnabled()
+    assert "(not set)" in dialog.report_text()
+
+    def fake_metadata(self: MetadataDialog) -> QDialog.DialogCode:
+        self.title.setText("Edited From Properties")
+        self.author.setText("Radwan")
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(MetadataDialog, "exec", fake_metadata):
+        dialog.edit_metadata_button.click()
+
+    # The edit really happened, through the ordinary Operation path.
+    applied = tab.controller.doc.operation_log[-1].serialize()
+    assert applied["type"] == "set_metadata"
+    assert window.undo_action.isEnabled()
+    assert len(window.audit_log.read_all()) == audit_entries_before + 1
+    with pikepdf.Pdf.open(tab.controller.doc.working_path) as pdf:
+        assert str(pdf.docinfo["/Title"]) == "Edited From Properties"
+
+    # ...and the still-open report refreshed rather than going stale.
+    refreshed = dialog.report_text()
+    assert "Edited From Properties" in refreshed
+    assert "Radwan" in refreshed
+    _force_close(window)
+
+
+def test_properties_edit_metadata_cancelled_leaves_the_report_untouched(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    dialog = PropertiesDialog(
+        window._read_properties(tab),
+        lambda: window._edit_metadata_from_properties(tab),
+    )
+    before = dialog.report_text()
+
+    def fake_cancel(self: MetadataDialog) -> QDialog.DialogCode:
+        return QDialog.DialogCode.Rejected
+
+    with patch.object(MetadataDialog, "exec", fake_cancel):
+        dialog.edit_metadata_button.click()
+
+    assert dialog.report_text() == before
+    assert tab.controller.doc.operation_log == []
+    window.close()
+
+
+def test_properties_dialog_opens_from_the_menu_action(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    _open_tab(window, src)
+
+    shown: list[PropertiesDialog] = []
+
+    def fake_exec(self: PropertiesDialog) -> QDialog.DialogCode:
+        shown.append(self)
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(PropertiesDialog, "exec", fake_exec):
+        window.properties_action.trigger()
+
+    assert len(shown) == 1
+    assert "src.pdf" in shown[0].report_text()
+    window.close()
+
+
+def test_properties_of_a_password_protected_document_degrades_without_crashing(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """A real, reachable state: Protect encrypts the working copy with
+    a user password, so the inspector cannot reopen it."""
+    from core.ops.security import ProtectOperation
+
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    tab.controller.apply_operation(ProtectOperation(user_password="hunter2"))
+
+    info = window._read_properties(tab)
+    assert info.password_protected is True
+    dialog = PropertiesDialog(info)
+    report = dialog.report_text()
+    assert "Encrypted:" in report
+    assert "Unavailable" in report
+    assert str(src) in report  # the on-disk facts still work
+    _force_close(window)
+
+
+def test_properties_of_a_document_with_no_file_on_disk(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Merge builds a document from scratch, so there is no source file
+    to stat - the report says so rather than showing a blank path."""
+    inputs = [_make_pdf(tmp_path / f"in{i}.pdf", 1) for i in range(2)]
+    window = MainWindow()
+
+    def fake_merge(self: MergeDialog) -> QDialog.DialogCode:
+        for path in inputs:
+            self.file_list.addItem(str(path))
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(MergeDialog, "exec", fake_merge):
+        window._run_tool("merge", MergeDialog)
+
+    tab = window.current_tab
+    assert tab is not None
+    info = window._read_properties(tab)
+    assert info.file.path is None
+    assert info.geometry is not None
+    assert info.geometry.page_count == 2
+    assert "not saved to disk yet" in PropertiesDialog(info).report_text()
+    _force_close(window)
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="/proc/self/fd is the Linux way to see open handles"
+)
+def test_properties_holds_no_handle_on_the_working_file(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """The inspector must not keep the session working copy open.
+
+    CLAUDE.md records a real Windows CI failure (WinError 32) where a
+    leaked QPdfDocument handle turned "securely wipe the confidential
+    working copy on close" into a SecurityError. This dialog reads via
+    a `with pikepdf.Pdf.open(...)` block and holds only plain data, so
+    it should never take a handle at all - checked against the OS
+    rather than inferred, because the wipe below succeeds on Linux
+    whether a handle leaked or not.
+    """
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    working = tab.controller.doc.working_path
+
+    def open_files() -> set[str]:
+        found = set()
+        for fd in os.listdir("/proc/self/fd"):
+            with contextlib.suppress(OSError):
+                found.add(os.readlink(f"/proc/self/fd/{fd}"))
+        return found
+
+    def fake_exec(self: PropertiesDialog) -> QDialog.DialogCode:
+        assert str(working) not in open_files(), "properties dialog is holding the working file"
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(PropertiesDialog, "exec", fake_exec):
+        window.properties_action.trigger()
+
+    assert str(working) not in open_files()
+    session_dir = working.parent
+    tab.controller.close_session()
+    assert not session_dir.exists()
+    window.close()
+
+
+# --- PDF -> external-format exports -----------------------------------------
+#
+# These five conversions used to be applied to the tab like any other
+# operation, which replaced its PDF working file with a .docx/.pptx/
+# .xlsx/.html/.jpg. The thumbnail grid cannot render one, so the window
+# went blank and the document appeared to vanish - and the converted
+# file, left in the private session dir, was securely wiped when the
+# tab closed. They are exports now: the file goes where the user asks,
+# and the open document is untouched.
+
+
+_EXPORT_CASES = [
+    ("pdf_to_docx", {}, ".docx"),
+    ("pdf_to_pptx", {}, ".pptx"),
+    ("pdf_to_xlsx", {}, ".xlsx"),
+    ("pdf_to_html", {}, ".html"),
+    ("pdf_to_jpg", {"page": 1}, ".jpg"),
+]
+
+
+@pytest.mark.parametrize(("tool_id", "values", "suffix"), _EXPORT_CASES)
+def test_converting_from_pdf_writes_a_file_and_leaves_the_document_open(
+    qapp: QApplication,
+    tmp_path: Path,
+    tool_id: str,
+    values: dict[str, Any],
+    suffix: str,
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    destination = tmp_path / f"exported{suffix}"
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    dialog_cls = TOOL_DIALOGS[tool_id]
+
+    with (
+        patch.object(dialog_cls, "exec", lambda self: QDialog.DialogCode.Accepted),
+        patch.object(dialog_cls, "values", lambda self: values),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=(str(destination), "")),
+    ):
+        window._run_tool(tool_id, dialog_cls)
+
+    # The converted file is where the user asked for it, and is real.
+    assert destination.exists()
+    assert destination.stat().st_size > 0
+    # The window still shows the PDF - this is the blank-screen symptom.
+    assert tab.thumbnail_list.count() == 2
+    working_path = tab.controller.doc.working_path
+    assert working_path is not None
+    assert working_path.suffix == ".pdf"
+    # An export is not an edit: nothing to undo, nothing unsaved.
+    assert tab.controller.doc.operation_log == []
+    assert not tab.controller.is_dirty
+    assert not window.undo_action.isEnabled()
+    _force_close(window)
+
+
+def test_an_export_survives_the_session_being_wiped(qapp: QApplication, tmp_path: Path) -> None:
+    """The other half of the bug: the converted file used to live only
+    in the private session dir, which is securely wiped when the tab
+    closes - so the user's Word file was destroyed rather than
+    delivered. It has to outlive the session that produced it."""
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    destination = tmp_path / "exported.docx"
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    working_path = tab.controller.doc.working_path
+    assert working_path is not None
+    session_dir = working_path.parent
+
+    with (
+        patch.object(PdfToDocxDialog, "exec", lambda self: QDialog.DialogCode.Accepted),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=(str(destination), "")),
+    ):
+        window._run_tool("pdf_to_docx", PdfToDocxDialog)
+
+    _force_close(window)
+
+    assert not session_dir.exists(), "the tab's session dir should have been wiped"
+    assert destination.exists(), "the exported file was wiped along with the session"
+    assert destination.stat().st_size > 0
+
+
+def test_cancelling_the_export_destination_changes_nothing(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+
+    with (
+        patch.object(PdfToDocxDialog, "exec", lambda self: QDialog.DialogCode.Accepted),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=("", "")),
+    ):
+        window._run_tool("pdf_to_docx", PdfToDocxDialog)
+
+    assert tab.thumbnail_list.count() == 2
+    assert tab.controller.doc.operation_log == []
+    assert not tab.controller.is_dirty
+    _force_close(window)
+
+
+def test_an_export_is_recorded_in_the_audit_log(qapp: QApplication, tmp_path: Path) -> None:
+    """Every other path that applies an Operation records to the audit
+    trail, and an export writes a confidential document out to a new
+    file - exactly what the trail exists for."""
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    destination = tmp_path / "exported.docx"
+    window = MainWindow()
+    _open_tab(window, src)
+    entries_before = len(window.audit_log.read_all())
+
+    with (
+        patch.object(PdfToDocxDialog, "exec", lambda self: QDialog.DialogCode.Accepted),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=(str(destination), "")),
+    ):
+        window._run_tool("pdf_to_docx", PdfToDocxDialog)
+
+    entries = window.audit_log.read_all()
+    assert len(entries) == entries_before + 1
+    # The field itself, not a substring of the whole entry's repr: on
+    # Windows a path's backslashes come back doubled through JSON, so
+    # `str(destination) in str(entry)` is false for a correctly
+    # recorded entry (caught by CI on Windows, not locally).
+    assert entries[-1]["document"] == str(destination)
+    assert entries[-1]["operation"]["type"] == "pdf_to_docx"
+    _force_close(window)
+
+
+def test_an_export_extension_is_added_only_when_the_user_typed_none(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    _open_tab(window, src)
+    bare = tmp_path / "no_extension"
+
+    with (
+        patch.object(PdfToDocxDialog, "exec", lambda self: QDialog.DialogCode.Accepted),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=(str(bare), "")),
+    ):
+        window._run_tool("pdf_to_docx", PdfToDocxDialog)
+
+    assert (tmp_path / "no_extension.docx").exists()
+    assert not bare.exists()
+
+    # An extension the user chose deliberately is left alone.
+    chosen = tmp_path / "report.doc"
+    with (
+        patch.object(PdfToDocxDialog, "exec", lambda self: QDialog.DialogCode.Accepted),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=(str(chosen), "")),
+    ):
+        window._run_tool("pdf_to_docx", PdfToDocxDialog)
+
+    assert chosen.exists()
+    _force_close(window)
+
+
+def test_a_failing_export_reports_the_error_and_leaves_the_document_open(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    destination = tmp_path / "out.jpg"
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    errors: list[str] = []
+
+    with (
+        patch.object(PdfToJpgDialog, "exec", lambda self: QDialog.DialogCode.Accepted),
+        # Page 99 of a 2-page document: rejected by the operation itself.
+        patch.object(PdfToJpgDialog, "values", lambda self: {"page": 99}),
+        patch("gui.main_window.QFileDialog.getSaveFileName", return_value=(str(destination), "")),
+        patch.object(MainWindow, "_show_error", lambda self, exc: errors.append(str(exc))),
+    ):
+        window._run_tool("pdf_to_jpg", PdfToJpgDialog)
+
+    assert errors, "a failed export must report the error"
+    assert not destination.exists()
+    assert tab.thumbnail_list.count() == 2
+    assert tab.controller.doc.operation_log == []
+    _force_close(window)

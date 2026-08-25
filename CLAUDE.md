@@ -1983,3 +1983,380 @@ this project's usual convention, to confirm the unparented
 
 Not pushed: CI config changes are the human's call to validate against
 a real GitHub run, which is the only place the Linux fix can be proven.
+
+## Document Properties dialog (File > Properties..., Ctrl+D) — done
+
+A read-only report on the active tab's document: metadata, the file on
+disk, page geometry, PDF technical/security flags. **Not** an
+`Operation`, not in `TOOL_DIALOGS`, not in the CLI — it mutates
+nothing and produces no undo entry, the same scoping the View menu's
+plain `QAction`s already rely on.
+
+**Module placement: `core/document_info.py`, top-level in `core/`.**
+Qt-free (so it unit-tests without a display server, like
+`gui/controller.py`) and engine code (so `mypy --strict` covers it),
+but no existing subpackage owns it: `core/ops/` is "first-party
+plugins, one module per category" per SPEC.md 2 and this is not an
+`Operation` (and it spans metadata + layout + security at once);
+`core/model/` is the frozen framework, and a description of a *file*
+is not a model of an editing session — putting it there would also
+make the frozen-interface package depend on things above it;
+`core/session/` is persistence and nothing here is persisted. That
+leaves the top level, next to `errors.py`/`logging_config.py`.
+
+**`read_document_info()` never raises.** A read-only report that dies
+on one bad field is worse than one that says "unknown": every field is
+individually guarded and an unopenable document comes back as a
+`DocumentInfo` with `read_error` set. Nothing here writes, so there is
+no failure that needs to propagate as a `core/errors.py` exception —
+the "raise only from the hierarchy" rule is satisfied by raising
+nothing.
+
+**Cost, measured not assumed**: catalog/trailer reads plus one
+MediaBox+Rotate read per page — no rendering, no content streams. On a
+2000-page fixture the whole report takes **0.39s**, of which 0.26s is
+`pikepdf.Pdf.open` itself and only **0.02s** is all 2000 page-box
+reads. No per-page scan to avoid; the dialog opens effectively
+instantly.
+
+### Real findings, each verified against a real PDF
+
+- **`pikepdf.PasswordError` is not a `pikepdf.PdfError` subclass** (its
+  base is plain `Exception`, confirmed on pikepdf 10.11) — it needs its
+  own `except` clause or it escapes a `PdfError`-only handler. Not
+  hypothetical: `ProtectOperation` requires a *non-empty user
+  password*, so the working copy of a just-protected document genuinely
+  cannot be reopened, and File > Properties on it hits this path. It
+  degrades to "encrypted: yes, everything else unavailable" with the
+  on-disk section (which needs no parsing) still fully populated.
+- **`Pdf.pdf_version` is the `%PDF-x.y` header only.** PDF 1.4+ lets
+  the catalog's `/Version` override it (used by incremental updates
+  that don't rewrite the header). Confirmed: pikepdf keeps reporting
+  1.3 for a file whose catalog says 1.7, so `_read_pdf_version` applies
+  the override itself or the dialog under-reports.
+- **`Pdf.allow` reports everything as allowed on an *unencrypted*
+  file** — true, but not worth four rows, so permissions are only shown
+  when `is_encrypted`. `Pdf.encryption` additionally raises a bare
+  `KeyError('R')` on an unencrypted document, so it isn't touched.
+- **qpdf repairs a missing or malformed `/MediaBox` while opening.**
+  Tried four ways to build a page whose box can't be read (deleting the
+  key and re-saving, string entries, three entries, a `Name` instead of
+  an array) — every one came back as a default 612x792 letter page, so
+  `Page.mediabox` effectively never fails for a file pikepdf can open
+  at all. `_page_size`'s guard stays as belt-and-braces; `/Rotate` is
+  the one that genuinely can fail (a non-integer survives into the
+  object model and `int()` raises `TypeError`). Pinned by a test so a
+  future pikepdf that stops repairing shows up as a failure rather than
+  a silently wrong page size.
+- **Tagged is `/MarkInfo /Marked` *and* `/StructTreeRoot`** — a
+  `/Marked` flag with no structure tree behind it is a lie some
+  producers tell, and is reported as not tagged.
+- **Sub-point size noise is folded** (`_SIZE_TOLERANCE_PT = 0.5`): real
+  producers emit A4 as both 595.276x841.89 and 595.28x841.89, and
+  calling that "Mixed (2 sizes)" would be technically true and useless.
+
+**Metadata reader/writer agreement**: the six editable fields use the
+same names and docinfo keys `SetMetadataOperation` writes
+(`_FIELD_TO_DOCINFO_KEY`), duplicated rather than imported — `core/ops`
+sits above `core/` architecturally, and reaching for another module's
+private name to save eight lines isn't worth inverting that.
+`test_docinfo_keys_match_the_operation_that_writes_them` pins the two
+together instead. `/Creator` and `/Producer` are read-only extras (that
+operation deliberately doesn't offer them for editing). Dates read back
+as ISO 8601 — the exact format `MetadataDialog` asks the user to type,
+so a value shown here can be pasted straight back into an edit — or as
+the raw `D:...` string verbatim when unparseable, never dropped.
+Absent (`None`) and present-but-blank (`""`) are kept distinct and
+rendered differently ("(not set)" vs "(empty)").
+
+**Working copy vs. file on disk.** The parsed sections describe
+`doc.working_path` (current edit state, unsaved changes included); the
+File on disk section stat()s `doc.source_path` (the untouched
+original). The "Unsaved changes" row exists precisely so
+"Modified: 3 days ago" can't read as "your 20 edits are on disk".
+`test_properties_describes_the_working_copy_not_the_untouched_original`
+deletes a page and asserts the report says 2 pages while the file on
+disk still has 3.
+
+**Creation time is the one field that isn't always obtainable** —
+`st_birthtime` doesn't exist on Linux before Python 3.13/statx (absent
+on this dev box). Reported as "(not recorded by this filesystem)"
+rather than substituting `st_ctime`, which is the inode *change* time
+and would quietly show something that isn't a creation date.
+
+### GUI
+
+`gui/dialogs/properties_dialog.py`'s `PropertiesDialog` is a plain
+`QDialog`, the second one after `TabPlacementDialog` and for a related
+reason: `BaseToolDialog` is an options form + OK/Cancel feeding
+`build_operation()`, and this has no `values()` at all. A single
+`list[(section, [(label, value)])]` feeds both the widgets and the
+clipboard text, so the copied report can't drift from the displayed
+one.
+
+- **Refresh in place, not close-and-reopen**, after Edit Metadata...:
+  the rows are regenerated from one fresh `DocumentInfo`, so there's no
+  flicker and the dialog keeps its position. Edit Metadata... calls
+  back into `MainWindow._edit_metadata_from_properties`, which runs the
+  ordinary `_run_tool("set_metadata", ...)` path — the only path that
+  puts the edit on the undo stack *and* in the audit log — and returns
+  a new report only if `operation_log` actually grew.
+- **A stock `QScrollArea` reports a small fixed `sizeHint` regardless
+  of its content**, and the dialog opened as a **520x125 sliver** with
+  every section scrolled out of sight. Fixed with a `_ReportScrollArea`
+  whose `sizeHint()` follows the widget inside it. A second, subtler
+  half of the same bug: an intermediate container widget's
+  `QWidgetItem` caches a size hint taken before its own children exist
+  and nothing re-validates it while the dialog is unshown, so the outer
+  layout kept reporting 0x0 — the section group boxes now go straight
+  into the layout the dialog is sized from, with no wrapper widget.
+  Both found by measuring, not reasoning.
+- **`QAction.menu()` hands Python a fresh *owning* wrapper in PySide6
+  6.11** — releasing it destroys the real menu, and the next touch
+  raises `RuntimeError: Internal C++ object (QMenu) already deleted`.
+  Hit while writing the File-menu placement test; the fix is
+  `window.findChildren(QMenu)` and matching on `title()`. Worth
+  remembering for any future test that walks the menu tree.
+- No file handles: the inspector reads inside a
+  `with pikepdf.Pdf.open(...)` block and the dialog stores plain data,
+  no `QPdfDocument` anywhere. Verified via `/proc/self/fd` around a
+  real `properties_action.trigger()` (before, during `exec`, after, and
+  after `close_session()` — empty every time, and the session dir wiped
+  cleanly), and pinned by a Linux-only regression test, because the
+  wipe succeeds on Linux whether a handle leaked or not — the exact
+  reason the Sign leak reached Windows CI.
+
+**Verified visually, per this project's standing rule.** Rendered the
+real dialog to PNG via `widget.grab()` under `QT_QPA_PLATFORM=offscreen`
+with the real palette + `styles.qss` applied, and looked at seven
+cases: fully-populated metadata, completely empty metadata, mixed page
+sizes, encrypted-with-restricted-permissions, password-protected,
+a document with no file on disk (Merge), and one opened through the
+real `File > Properties...` action. No label truncated; a deliberately
+long deep path wraps at its `/` separators rather than eliding or
+widening the dialog; the mm/inch pairs keep fixed decimals so the two
+numbers line up (only points drop a trailing `.0`).
+
+Full suite: **537 passed, 1 skipped** (478 baseline + 60 new; the
+`st_birthtime` one skips where the filesystem records no creation
+time), `ruff check .` clean, `mypy core cli gui` clean.
+
+**One flaw the screenshot review above could not have caught, found in
+a follow-up review and fixed**: the dialog asked for ~200px more
+height than it uses. A word-wrapping `QLabel` reports its height at
+its own *preferred* width, so the height Qt derives from the content's
+`sizeHint()` assumes text wrapping that doesn't happen at the wider
+width the dialog really opens at - measured on a two-page fixture, the
+content hints 857px tall at its preferred 276px width but needs only
+704px at the 482px it actually gets, leaving dead space above the
+button row. **This is invisible to an offscreen `grab()`**: the
+virtual screen is 800px tall, so Qt's own two-thirds cap (533px) bites
+first and the scroll bar hides the slack - it only shows on a real
+display tall enough to grant the full hinted height. Fixed with
+`PropertiesDialog.showEvent` -> `_shrink_to_content()`, which resizes
+to `layout.heightForWidth(viewport_width) + chrome`. It only ever
+*shrinks*: the screen cap, the minimum width, and any later user
+resize all still win, and a dialog already shorter than its content
+keeps the scroll area doing its job.
+`test_properties_dialog_leaves_no_dead_space_below_its_content` grows
+the dialog past the offscreen cap first, deliberately recreating the
+real-display case the cap would otherwise mask, and
+`test_properties_dialog_never_grows_past_the_height_it_was_given`
+pins the one-way direction.
+
+Full suite after that fix: **539 passed, 1 skipped** (537 + 2 new).
+
+### Creation date on Linux: `statx()` via ctypes (`core/file_times.py`)
+
+The first cut of this dialog reported "(not recorded by this
+filesystem)" for Created on Linux. That diagnosis was wrong, and the
+correction matters for anything else in this project that wants file
+timestamps: **Linux records a birth time, Python just doesn't expose
+it.** `stat(1)` prints `Birth:` for ext4/Btrfs/XFS(v5)/F2FS, but
+`os.stat()` has `st_birthtime` only on macOS and Windows - CPython has
+never adopted the `statx()` syscall that returns it on Linux (still
+true as of 3.12/3.13; the earlier note here claiming "3.13/statx"
+fixes it was wrong). Confirmed on this box: `stat /etc/hostname` shows
+a Birth line while `hasattr(os.stat(...), "st_birthtime")` is False.
+
+`core/file_times.py`'s `birth_time()` calls `statx()` directly through
+`ctypes` - no new dependency, no subprocess, no parsing `stat(1)`
+output. Order: stdlib `st_birthtime` first (so the module retires its
+own code path automatically if CPython ever catches up), then
+`statx(STATX_BTIME)` on Linux, then None.
+
+- **The full `struct statx` is reproduced, not truncated to the fields
+  used.** The kernel writes all 256 bytes, so a short buffer would be
+  memory corruption rather than a harmless simplification;
+  `ctypes.sizeof` is checked against 256 both at load time (refusing to
+  call on mismatch) and in a test.
+- **`None` is a real answer, not only an error.** A filesystem can
+  succeed while leaving the `STATX_BTIME` bit *clear* in the result
+  mask - verified against `/proc/cpuinfo`, which does exactly that, and
+  matches `stat(1)` printing `Birth: -`. Also true of some tmpfs/NFS/
+  FAT mounts and of ext4 made with 128-byte inodes. So "no creation
+  time" and "call failed" are distinguished, and `st_ctime` is still
+  never substituted (it is the inode *change* time).
+- The libc lookup is cached including its negative answer, so a
+  platform that cannot answer doesn't re-`dlopen` per file. glibc has
+  exported `statx` since 2.28 (2018); older glibc, musl without it, and
+  kernels before 4.11 (`ENOSYS`) all degrade to None rather than
+  raising. Never raises.
+- Typing note: `ctypes._NamedFuncPointer` is a typeshed-only name (at
+  runtime `CDLL` builds a per-library `_FuncPtr` class), so it is
+  imported under `TYPE_CHECKING` and used only in PEP 563 annotations.
+
+**Verified against ground truth, not against itself**: our value is
+compared to `stat(1)`'s own Birth field for the same file - an
+independent implementation - because a birth time that is merely *a*
+plausible datetime would pass a self-consistent test while actually
+reporting `st_ctime`, which is usually close enough to look right.
+Matched to the microsecond including timezone. A separate test proves
+the distinction directly: modifying a file moves `st_ctime` but must
+leave the birth time unchanged.
+
+**A real flake found and fixed while writing those tests**: a strict
+`before <= created <= after` assertion fails, because inode timestamps
+come from the kernel's *coarse* tick-based clock and do not order
+strictly against `CLOCK_REALTIME` as `datetime.now()` reads it -
+measured, a freshly created file's birth time landed **1.5ms ahead of
+a `now()` taken after the write**. The test uses a tolerance window and
+says why; confirmed stable over 10 consecutive runs.
+
+Two existing tests had to be rewritten, not just extended - both had
+encoded the wrong diagnosis:
+`test_creation_time_is_reported_where_the_platform_records_one` skipped
+on Linux via `hasattr(..., "st_birthtime")` (it now runs, and skips
+only where the *filesystem* genuinely records nothing), and
+`test_creation_time_is_none_rather_than_a_wrong_value_when_unavailable`
+asserted `created is None` on any platform without `st_birthtime` -
+which the fix makes false on Linux. It now forces the unavailable case
+by monkeypatching instead of waiting for a filesystem that exhibits it.
+
+Full suite: **549 passed, 0 skipped** (539 passed + 1 skipped, plus 9
+new tests) - the `st_birthtime` skip this entry replaces is gone, and
+nothing in the suite skips on Linux any more.
+
+## PDF -> external-format conversions blanked the window (fixed)
+
+User report: "convert pdf to word gives a blank screen." Reproduced
+immediately against the real `MainWindow`, and it affected **all five**
+PDF -> X conversions (`pdf_to_docx`, `pdf_to_pptx`, `pdf_to_xlsx`,
+`pdf_to_html`, `pdf_to_jpg`), each confirmed by running it rather than
+inferred from shared code: thumbnails went 2 -> 0, status bar "0
+page(s)", log line `Could not load PDF for thumbnail rendering`.
+
+**Root cause.** Every one of these operations ends
+`return next_session(doc, out_path)` where `out_path` is a
+`.docx`/`.pptx`/`.xlsx`/`.html`/`.jpg` (`core/ops/convert_from.py`).
+That is the *correct* shape for the CLI (which copies the result
+straight to `-o`) and for a Workflow step. But `_run_tool` handed it to
+`AppController.apply_operation` like any other tool, so the tab's
+working file stopped being a PDF, and `_render_thumbnails` -
+`QPdfDocument` - had nothing renderable. The document appeared to
+vanish.
+
+**The worse half, which the report hadn't reached yet**: the converted
+file was written into the private session temp dir and surfaced
+nowhere, so it was **securely wiped when the tab closed**. The
+behaviour was "blank the window, then destroy the user's Word file."
+
+**Fix, in the GUI only - no Operation was touched.** These five are
+*exports*: they produce a file to keep, not a new editing state.
+`_EXPORT_TOOLS` (`gui/main_window.py`) maps each tool_id to its
+extension and file-dialog filter, and `_run_tool` routes them to the
+new `_export_document()` instead of `apply_operation`. That runs the
+conversion against a throwaway `SessionTempDir` seeded with a copy of
+the working PDF - the same isolation `_run_workflow` already uses - and
+copies the result to a path the user picks via `QFileDialog`.
+
+Consequences, all deliberate:
+- The tab's `AppController`, document, undo stack and dirty flag are
+  never touched. **No undo entry**: converting to Word does not modify
+  the PDF, so there is nothing to undo.
+- The audit log still records it, for the same reason `_run_workflow`
+  does - an export writes a confidential document out to a new file,
+  which is precisely what the trail is for.
+- A cancelled destination dialog is a clean no-op.
+- The extension is appended only when the user typed none; one they
+  chose deliberately (`report.doc`) is respected.
+- CLI behaviour is entirely unchanged, as is using these ops as
+  Workflow steps.
+
+**Verified against real output, not just "didn't raise"**: each of the
+five exported files was opened with its own library - `python-docx`
+(both pages' text present), `python-pptx` (2 slides, an image shape
+each), `openpyxl`, the raw HTML text, and PIL (a real 834x1112 JPEG).
+The window was also grabbed to PNG after a conversion and looked at:
+both page thumbnails still rendered, tab not dirty, Undo greyed out,
+status bar reading "Exported to ...".
+
+**The regression tests were confirmed to actually catch the bug**, not
+merely to pass: with the `_EXPORT_TOOLS` branch temporarily disabled,
+9 of the 10 new tests fail. (The tenth is the failed-export error-path
+test, which was correct before and after - worth knowing rather than
+assuming all 10 were load-bearing.) One test asserts the thing that
+makes this more than cosmetic: the exported file still exists *after*
+`_force_close` wipes the session dir it was produced in.
+
+Full suite: **559 passed** (549 + 10 new), `ruff check .` clean,
+`mypy core cli gui` clean.
+
+### CI caught three cross-platform failures the Linux dev box could not
+
+PR #1 was the first three-OS run of this work. Ubuntu passed; **macOS
+failed 1 test and Windows 3** - one genuine UI defect and two test bugs
+of my own. Worth recording because all three are the same *category*:
+assumptions that only hold on the platform the code was written on.
+
+**1. A real defect: the Properties dialog's buttons truncated on
+Windows.** `'&Copy to Clipboard' rendered at 213px but needs 218px`.
+`PropertiesDialog` set a hardcoded `_MINIMUM_WIDTH = 520`, which fit
+Fusion's metrics on Linux *by luck* - Windows' native font metrics are
+wider, the three-button row needed more than 520, and a
+`QDialogButtonBox` squeezes its buttons below their `sizeHint()`
+rather than refusing to fit. (This qualifies the "Dialog
+button-truncation audit" entry above: that audit measured every dialog
+against its own `sizeHint()` and found nothing - correctly, *on
+Fusion*. It could not have found this.)
+
+Fixed by deriving the requirement instead of guessing it: each button
+gets `setMinimumWidth(button.sizeHint().width())`, so the layout
+minimum reflects what the row actually needs on whatever
+platform/style is in play. `_MINIMUM_WIDTH` stays, but only as the
+report's readability floor, which is all it was ever fit to be.
+
+**Reproduced on Linux rather than fixed blind**, after a first attempt
+that proved nothing: shrinking the dialog does *not* reproduce it
+(`setMinimumWidth(520)` floors it, so the buttons never get squeezed).
+The Windows condition is "the button row needs *more* than 520", so
+the reproduction is to enlarge the application font, exactly as
+Windows' wider metrics do. At `QFont("Sans", 26)` the row needs 682px
+and, without the fix, the two action buttons come back at 198px
+against `sizeHint()`s of 308 and 271 - truncated. With the fix, every
+button keeps its full width.
+`test_properties_dialog_buttons_fit_under_wider_font_metrics`
+(`tests/unit/test_dialog_sizing.py`) pins this, and asserts the row
+really does exceed the hardcoded floor so it cannot silently stop
+exercising the condition it claims to.
+
+**2. A test bug, macOS: `test_no_birth_time_where_statx_is_unavailable`
+disabled only the syscall path.** On macOS the stdlib `st_birthtime`
+answers first - and *should* - so the test asserted `None` and got a
+perfectly correct datetime. Denying one of two sources proves nothing
+about a fallback chain; renamed to
+`test_no_birth_time_where_neither_source_can_answer` and now passes a
+stat result with no `st_birthtime` alongside the patched-out syscall,
+so it means the same thing on every platform.
+
+**3. A test bug, Windows: asserting a path against a stringified
+dict.** `assert str(destination) in str(entries[-1])` fails for a
+*correctly* recorded audit entry, because a Windows path's backslashes
+come back doubled through JSON. Now asserts the field itself
+(`entries[-1]["document"] == str(destination)`), which is what it
+meant all along - and additionally checks the recorded operation type.
+
+The lesson worth keeping: `str(some_dict)` in an assertion is a
+platform-dependent substring check wearing a disguise, and a test that
+disables one branch of a fallback chain has to disable the others too
+or it silently tests something else.

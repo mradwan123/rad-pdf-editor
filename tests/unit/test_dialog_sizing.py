@@ -20,16 +20,21 @@ needing two dialog instances or a saved baseline constant.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pikepdf
 import pytest
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton
 
+from core.document_info import read_document_info
 from core.registry.registry import Registry, discover_and_load
 from gui.dialogs.base_tool_dialog import BaseToolDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
 from gui.dialogs.merge_dialog import MergeDialog
+from gui.dialogs.properties_dialog import PropertiesDialog
 from gui.dialogs.rotate_dialog import RotateDialog
 from gui.dialogs.run_workflow_dialog import RunWorkflowDialog
 from gui.dialogs.tab_placement_dialog import TabPlacementDialog
@@ -281,3 +286,115 @@ def test_tab_placement_dialog_buttons_fit_their_text(document_name: str | None) 
     _qapp()
     dialog = TabPlacementDialog(document_name)
     _assert_no_button_is_narrower_than_its_own_text_needs(dialog)
+
+
+@pytest.mark.parametrize("populated", [True, False])
+def test_properties_dialog_buttons_fit_their_text(tmp_path: Path, populated: bool) -> None:
+    # PropertiesDialog is the second plain-QDialog subclass in the app
+    # (after TabPlacementDialog above), so like that one it inherits no
+    # widened sizeHint() and has to be measured on its own. Its three
+    # buttons include the longest label in any dialog here ("Copy to
+    # Clipboard"), and its content varies wildly - a fully-populated
+    # report versus one where every metadata field is "(not set)" -
+    # so both are checked.
+    _qapp()
+    source = tmp_path / "src.pdf"
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    if populated:
+        pdf.docinfo["/Title"] = "A Reasonably Long Document Title Here"
+        pdf.docinfo["/Producer"] = "Some PDF Producing Library, version 4.2.1"
+    pdf.save(source)
+
+    dialog = PropertiesDialog(read_document_info(source, source_path=source))
+    _assert_no_button_is_narrower_than_its_own_text_needs(dialog)
+
+
+def test_properties_dialog_leaves_no_dead_space_below_its_content(tmp_path: Path) -> None:
+    # A word-wrapping QLabel hints its height at its own preferred
+    # width, so the height Qt derives for this dialog is taller than
+    # the content needs once it has its real, wider geometry - which
+    # showed up as ~200px of empty space above the button row.
+    # PropertiesDialog.showEvent trims that; this pins it.
+    #
+    # The grow-then-shrink dance is deliberate: under
+    # QT_QPA_PLATFORM=offscreen the virtual screen is 800px tall, so
+    # Qt's own two-thirds cap (533px) bites first and hides the
+    # symptom entirely - the very reason a screenshot review missed
+    # it. Growing past the cap recreates the real-display case.
+    _qapp()
+    source = tmp_path / "src.pdf"
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    pdf.docinfo["/Title"] = "A Reasonably Long Document Title Here"
+    pdf.save(source)
+
+    dialog = PropertiesDialog(read_document_info(source, source_path=source))
+    dialog.show()
+    dialog.resize(dialog.width(), 900)
+    dialog._shrink_to_content()
+
+    scroll = dialog._scroll
+    content_layout = scroll.widget().layout()
+    needed = content_layout.heightForWidth(scroll.viewport().width())
+
+    assert dialog.height() < 900, "the dialog kept height it does not use"
+    # The viewport ends up exactly as tall as the content needs: no
+    # dead space, and nothing pushed out of sight either.
+    assert scroll.viewport().height() == needed
+    dialog.close()
+
+
+def test_properties_dialog_never_grows_past_the_height_it_was_given(tmp_path: Path) -> None:
+    # The shrink is one-way. A dialog already shorter than its content
+    # (Qt's screen cap, or a user who dragged it small) must keep the
+    # scroll area doing its job rather than being re-expanded.
+    _qapp()
+    source = tmp_path / "src.pdf"
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    pdf.save(source)
+
+    dialog = PropertiesDialog(read_document_info(source, source_path=source))
+    dialog.show()
+    dialog.resize(dialog.width(), 200)
+    dialog._shrink_to_content()
+
+    assert dialog.height() == 200
+    dialog.close()
+
+
+def test_properties_dialog_buttons_fit_under_wider_font_metrics(tmp_path: Path) -> None:
+    """The Windows CI failure this pins, reproduced on any platform.
+
+    Every dialog here was developed against the Fusion style's font
+    metrics. Windows' native metrics are wider, and on CI the Properties
+    dialog's "Copy to Clipboard" button rendered at 213px when its own
+    text needed 218 - truncated, because `_MINIMUM_WIDTH` is a hardcoded
+    readability floor for the report and never derived from what the
+    button row actually needs, and a QDialogButtonBox will squeeze its
+    buttons below their sizeHint rather than refuse to fit.
+
+    Enlarging the application font reproduces exactly that condition
+    without needing Windows: it pushes the button row past the
+    hardcoded floor. Verified to fail before the fix (the two action
+    buttons came back at 198px against sizeHints of 308 and 271) and
+    pass after it.
+    """
+    app = _qapp()
+    source = tmp_path / "src.pdf"
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    pdf.save(source)
+
+    original_font = app.font()
+    app.setFont(QFont("Sans", 26))
+    try:
+        dialog = PropertiesDialog(read_document_info(source, source_path=source))
+        _assert_no_button_is_narrower_than_its_own_text_needs(dialog)
+        # ...and the requirement really did exceed the hardcoded floor,
+        # so this test is exercising the condition it claims to.
+        assert sum(b.sizeHint().width() for b in dialog.buttons.buttons()) > 520
+        dialog.close()
+    finally:
+        app.setFont(original_font)
