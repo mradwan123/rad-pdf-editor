@@ -140,16 +140,27 @@ def test_the_stdlib_is_preferred_when_it_has_the_answer(
     assert created == datetime.fromtimestamp(1_700_000_000.0).astimezone()
 
 
-def test_no_birth_time_where_statx_is_unavailable(
+def test_no_birth_time_where_neither_source_can_answer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A platform without the syscall (non-Linux, musl, glibc < 2.28,
-    kernel < 4.11) degrades to "unknown" rather than raising."""
+    """A platform where neither source has the answer (musl, glibc <
+    2.28, kernel < 4.11) degrades to "unknown" rather than raising.
+
+    Both sources have to be denied for this to mean anything: on
+    macOS/Windows the stdlib answers first and *should*, so disabling
+    only the syscall proves nothing there - it just exercises the
+    stdlib path under a misleading name. (Caught by CI on macOS, where
+    an earlier version of this test asserted None and got a perfectly
+    correct st_birthtime.)
+    """
     target = tmp_path / "fresh.pdf"
     target.write_bytes(b"%PDF-1.7\n")
     monkeypatch.setattr(file_times, "_load_statx", lambda: None)
 
-    assert birth_time(target) is None
+    class _StatWithoutBirthtime:
+        """A stat result from a platform whose stdlib has no birth time."""
+
+    assert birth_time(target, _StatWithoutBirthtime()) is None  # type: ignore[arg-type]
 
 
 def test_the_libc_lookup_is_only_performed_once(monkeypatch: pytest.MonkeyPatch) -> None:

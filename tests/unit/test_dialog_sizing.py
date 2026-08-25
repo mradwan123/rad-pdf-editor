@@ -26,6 +26,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pikepdf
 import pytest
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton
 
 from core.document_info import read_document_info
@@ -361,3 +362,39 @@ def test_properties_dialog_never_grows_past_the_height_it_was_given(tmp_path: Pa
 
     assert dialog.height() == 200
     dialog.close()
+
+
+def test_properties_dialog_buttons_fit_under_wider_font_metrics(tmp_path: Path) -> None:
+    """The Windows CI failure this pins, reproduced on any platform.
+
+    Every dialog here was developed against the Fusion style's font
+    metrics. Windows' native metrics are wider, and on CI the Properties
+    dialog's "Copy to Clipboard" button rendered at 213px when its own
+    text needed 218 - truncated, because `_MINIMUM_WIDTH` is a hardcoded
+    readability floor for the report and never derived from what the
+    button row actually needs, and a QDialogButtonBox will squeeze its
+    buttons below their sizeHint rather than refuse to fit.
+
+    Enlarging the application font reproduces exactly that condition
+    without needing Windows: it pushes the button row past the
+    hardcoded floor. Verified to fail before the fix (the two action
+    buttons came back at 198px against sizeHints of 308 and 271) and
+    pass after it.
+    """
+    app = _qapp()
+    source = tmp_path / "src.pdf"
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    pdf.save(source)
+
+    original_font = app.font()
+    app.setFont(QFont("Sans", 26))
+    try:
+        dialog = PropertiesDialog(read_document_info(source, source_path=source))
+        _assert_no_button_is_narrower_than_its_own_text_needs(dialog)
+        # ...and the requirement really did exceed the hardcoded floor,
+        # so this test is exercising the condition it claims to.
+        assert sum(b.sizeHint().width() for b in dialog.buttons.buttons()) > 520
+        dialog.close()
+    finally:
+        app.setFont(original_font)

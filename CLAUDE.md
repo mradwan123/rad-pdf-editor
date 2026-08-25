@@ -2301,3 +2301,62 @@ makes this more than cosmetic: the exported file still exists *after*
 
 Full suite: **559 passed** (549 + 10 new), `ruff check .` clean,
 `mypy core cli gui` clean.
+
+### CI caught three cross-platform failures the Linux dev box could not
+
+PR #1 was the first three-OS run of this work. Ubuntu passed; **macOS
+failed 1 test and Windows 3** - one genuine UI defect and two test bugs
+of my own. Worth recording because all three are the same *category*:
+assumptions that only hold on the platform the code was written on.
+
+**1. A real defect: the Properties dialog's buttons truncated on
+Windows.** `'&Copy to Clipboard' rendered at 213px but needs 218px`.
+`PropertiesDialog` set a hardcoded `_MINIMUM_WIDTH = 520`, which fit
+Fusion's metrics on Linux *by luck* - Windows' native font metrics are
+wider, the three-button row needed more than 520, and a
+`QDialogButtonBox` squeezes its buttons below their `sizeHint()`
+rather than refusing to fit. (This qualifies the "Dialog
+button-truncation audit" entry above: that audit measured every dialog
+against its own `sizeHint()` and found nothing - correctly, *on
+Fusion*. It could not have found this.)
+
+Fixed by deriving the requirement instead of guessing it: each button
+gets `setMinimumWidth(button.sizeHint().width())`, so the layout
+minimum reflects what the row actually needs on whatever
+platform/style is in play. `_MINIMUM_WIDTH` stays, but only as the
+report's readability floor, which is all it was ever fit to be.
+
+**Reproduced on Linux rather than fixed blind**, after a first attempt
+that proved nothing: shrinking the dialog does *not* reproduce it
+(`setMinimumWidth(520)` floors it, so the buttons never get squeezed).
+The Windows condition is "the button row needs *more* than 520", so
+the reproduction is to enlarge the application font, exactly as
+Windows' wider metrics do. At `QFont("Sans", 26)` the row needs 682px
+and, without the fix, the two action buttons come back at 198px
+against `sizeHint()`s of 308 and 271 - truncated. With the fix, every
+button keeps its full width.
+`test_properties_dialog_buttons_fit_under_wider_font_metrics`
+(`tests/unit/test_dialog_sizing.py`) pins this, and asserts the row
+really does exceed the hardcoded floor so it cannot silently stop
+exercising the condition it claims to.
+
+**2. A test bug, macOS: `test_no_birth_time_where_statx_is_unavailable`
+disabled only the syscall path.** On macOS the stdlib `st_birthtime`
+answers first - and *should* - so the test asserted `None` and got a
+perfectly correct datetime. Denying one of two sources proves nothing
+about a fallback chain; renamed to
+`test_no_birth_time_where_neither_source_can_answer` and now passes a
+stat result with no `st_birthtime` alongside the patched-out syscall,
+so it means the same thing on every platform.
+
+**3. A test bug, Windows: asserting a path against a stringified
+dict.** `assert str(destination) in str(entries[-1])` fails for a
+*correctly* recorded audit entry, because a Windows path's backslashes
+come back doubled through JSON. Now asserts the field itself
+(`entries[-1]["document"] == str(destination)`), which is what it
+meant all along - and additionally checks the recorded operation type.
+
+The lesson worth keeping: `str(some_dict)` in an assertion is a
+platform-dependent substring check wearing a disguise, and a test that
+disables one branch of a fallback chain has to disable the others too
+or it silently tests something else.

@@ -2567,7 +2567,12 @@ def test_an_export_is_recorded_in_the_audit_log(qapp: QApplication, tmp_path: Pa
 
     entries = window.audit_log.read_all()
     assert len(entries) == entries_before + 1
-    assert str(destination) in str(entries[-1])
+    # The field itself, not a substring of the whole entry's repr: on
+    # Windows a path's backslashes come back doubled through JSON, so
+    # `str(destination) in str(entry)` is false for a correctly
+    # recorded entry (caught by CI on Windows, not locally).
+    assert entries[-1]["document"] == str(destination)
+    assert entries[-1]["operation"]["type"] == "pdf_to_docx"
     _force_close(window)
 
 

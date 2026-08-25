@@ -157,6 +157,21 @@ class PropertiesDialog(QDialog):
         self.edit_metadata_button.setEnabled(on_edit_metadata is not None)
         self.buttons.rejected.connect(self.reject)
 
+        # Every button keeps at least the width its own text needs.
+        # QDialogButtonBox lays buttons out at their preferred width
+        # but will let them be squeezed below it when the dialog is
+        # narrower than the row wants, and nothing else here forces the
+        # dialog wide enough: `_MINIMUM_WIDTH` below is a readability
+        # floor for the report, not a figure derived from the buttons.
+        # On Windows - whose font metrics are wider than the Fusion
+        # style this was developed against - "Copy to Clipboard"
+        # rendered 5px short of its own text (213 vs 218) and elided.
+        # Asking each button for its own sizeHint is what makes the
+        # requirement real on every platform and style, rather than a
+        # hardcoded number that happened to be large enough on one.
+        for button in self.buttons.buttons():
+            button.setMinimumWidth(button.sizeHint().width())
+
         layout = QVBoxLayout(self)
         layout.addWidget(scroll)
         layout.addWidget(self.buttons)
