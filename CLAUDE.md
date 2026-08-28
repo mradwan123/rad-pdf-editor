@@ -2437,3 +2437,82 @@ by the `_EXPORT_TOOLS` work).
 
 Full suite: **567 passed** (560 baseline + 7 new), `ruff check .`
 clean, `mypy core cli gui` clean.
+
+## The rest of the conversion suite, audited the same way
+
+Extending the Word audit to the other four `*->PDF` conversions and
+the whole `PDF->*` direction. The weak-assertion pattern was
+suite-wide, not a Word oversight: **every** conversion test asserted
+only page count and engine name. `test_jpg_to_pdf_combines_images_into_
+one_pdf` is the starkest - it asserted a two-page PDF came out, which
+two blank pages satisfy; nothing checked an image was embedded at all.
+
+Content is correct in both engines for all four (verified against real
+extracted text, and real centre-pixel colours for JPG, which also
+confirmed page order follows source order). The bugs were all in the
+**pure-Python fallbacks disagreeing with LibreOffice**, and in one
+`PDF->*` operation:
+
+- **PPTX fallback dropped table shapes entirely.** A slide whose
+  content was a table converted to a genuinely blank page while
+  LibreOffice rendered all four cells. The docstring's "other shape
+  types (charts, SmartArt, ...) are skipped" did not cover this and
+  should not have: a table is *text*, which is exactly what the
+  reconstruction exists to preserve. Now drawn on an even grid inside
+  the shape's own rect (`_draw_pptx_table`); borders/fills aren't
+  reproduced, same bargain as the rest of the fallback.
+- **PPTX fallback never wrapped text.** `Canvas.drawString` does no
+  wrapping at all, so a text frame longer than its box was drawn as
+  one unbroken line running off the slide - measured, 101 of 122 words
+  past the right edge. Now `simpleSplit` against the same font/size the
+  text is drawn in (`_draw_wrapped_text`); that font is pinned in a
+  constant because measuring and drawing must agree or the wrap width
+  is meaningless.
+- **XLSX fallback ran wide sheets off both edges.** A bare
+  `Table(data)` sizes columns to their widest cell with no upper
+  bound: a 25-column sheet put 12 of 51 words off the page, and a
+  single 400-character cell reached x1=2980 on a 612pt page.
+
+  Worth recording is the *second* attempt here, because the first fix
+  was wrong in an instructive way. Fitting all columns into one page
+  width plus `splitLongWords=True` did put everything on the page - and
+  chopped values mid-word, `COL00` rendering as `C`/`OL`/`00`, which a
+  test caught immediately. 25 columns across a 540pt frame is ~21pt
+  each, narrower than a 5-character heading. LibreOffice paginates the
+  same sheet instead, so the fallback now splits a wide sheet into
+  column groups (`_SHEET_MIN_COLUMN_WIDTH`) rather than squeezing it.
+  Values stay intact; a normal-width sheet is a single group and is
+  unchanged.
+
+- **`PdfToPptxOperation` sized every slide to the *last* page.**
+  `slide_width`/`slide_height` are presentation-level (a pptx format
+  constraint, not a python-pptx gap) but were assigned inside the
+  per-page loop. A 300x400 page's image was emitted at 300x400pt onto
+  an 800x300pt slide, hanging off it - real for any report with one
+  landscape chart page. The first page now sets the deck size and every
+  page is fitted into it, aspect preserved and centred. Verified that
+  the ordinary uniform-size document is byte-for-byte unaffected
+  (picture at (0,0), exactly slide-sized), since that is the case that
+  must not regress.
+- **`PdfToPptxOperation` left its intermediate page PNGs** in the
+  session dir. They were wiped with the session, so not a leak, just
+  residue - `add_picture` has already copied the bytes into the package
+  by then, so they're unlinked immediately now.
+
+**A testing lesson worth keeping: fitz and pdfplumber do not agree
+about what is off-page.** The off-page helper was written with
+`fitz.get_text("words")` first, and it silently *passed* against the
+unfixed long-cell case that pdfplumber measured at x1=2980 - i.e. a
+regression test that could never fail. Caught only by running each new
+test against the pre-fix code (the discipline from the Word audit) and
+noticing one of them passed when it should not have. `_words_off_page`
+uses pdfplumber for this reason, and says so.
+
+Also confirmed correct and left alone: HTML->PDF both engines
+(including the existing remote-resource rejection and data-URI tests),
+`PdfToDocx`/`PdfToHtml`/`PdfToXlsx` content, `PdfToXlsx` on a PDF with
+no detectable tables (an empty default sheet, not a crash), and the
+CLI for the fixed paths.
+
+Full suite: **578 passed** (567 + 11 new), `ruff check .` clean,
+`mypy core cli gui` clean.

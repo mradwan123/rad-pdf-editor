@@ -88,6 +88,62 @@ def test_pdf_to_pptx_rejects_too_low_dpi() -> None:
         PdfToPptxOperation(dpi=10)
 
 
+def test_pdf_to_pptx_fits_mixed_page_sizes_inside_one_slide_size(tmp_path: Path) -> None:
+    """Regression: `slide_width`/`slide_height` are presentation-level,
+    but were being reassigned inside the per-page loop - so every slide
+    ended up sized to the *last* page. A 300x400 page's image was
+    emitted at 300x400pt onto an 800x300pt slide, hanging off it. A
+    pptx has one slide size by format, so each page is fitted into it
+    instead, aspect ratio preserved and centred.
+    """
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    doc = fitz.open()
+    doc.new_page(width=300, height=400).insert_text((40, 60), "PORTRAIT")
+    doc.new_page(width=800, height=300).insert_text((40, 60), "LANDSCAPE")
+    working = session_dir / "working.pdf"
+    doc.save(working)
+    doc.close()
+    session = DocumentSession(working_path=working, source_path=None)
+
+    result = session.apply(PdfToPptxOperation(dpi=72))
+    prs = Presentation(str(result.working_path))
+    assert prs.slide_width is not None and prs.slide_height is not None
+
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            assert shape.left >= 0 and shape.top >= 0
+            assert shape.left + shape.width <= prs.slide_width
+            assert shape.top + shape.height <= prs.slide_height
+
+    # The wide page keeps its 800:300 proportions rather than being
+    # stretched to the portrait slide.
+    wide = list(prs.slides)[1].shapes[0]
+    assert wide.width / wide.height == pytest.approx(800 / 300, rel=0.02)
+
+
+def test_pdf_to_pptx_uniform_pages_still_fill_the_slide_exactly(tmp_path: Path) -> None:
+    """The fit-and-centre logic must be a no-op for the ordinary
+    same-size-pages document - full bleed at the origin, as before."""
+    session = _session_with_pdf(tmp_path, [("p1", None), ("p2", None)])
+    result = session.apply(PdfToPptxOperation(dpi=72))
+    prs = Presentation(str(result.working_path))
+    for slide in prs.slides:
+        shape = slide.shapes[0]
+        assert shape.left == 0 and shape.top == 0
+        assert shape.width == prs.slide_width
+        assert shape.height == prs.slide_height
+
+
+def test_pdf_to_pptx_leaves_no_intermediate_page_images_behind(tmp_path: Path) -> None:
+    """Each page is rasterised to a PNG in the session dir on the way
+    into the deck; those were never cleaned up, so they accumulated
+    alongside the working files for the life of the session."""
+    session = _session_with_pdf(tmp_path, [("p1", None), ("p2", None)])
+    result = session.apply(PdfToPptxOperation(dpi=72))
+    assert list(result.working_path.parent.glob("pdf_to_pptx_p*.png")) == []
+
+
 # --- PdfToXlsxOperation ----------------------------------------------------
 
 
