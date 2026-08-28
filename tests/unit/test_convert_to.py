@@ -78,9 +78,26 @@ def _make_html(path: Path, body: str = "<h1>Hi</h1><p>paragraph</p>") -> Path:
     return path
 
 
+def _make_docx_with_a_table_between_paragraphs(path: Path) -> Path:
+    """A body whose children interleave - the shape that catches a
+    converter reading all paragraphs before all tables."""
+    document = docx.Document()
+    document.add_paragraph("PARA-BEFORE-TABLE")
+    table = document.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "TABLE-CELL"
+    document.add_paragraph("PARA-AFTER-TABLE")
+    document.save(str(path))
+    return path
+
+
 def _page_count(pdf_path: Path) -> int:
     with pikepdf.Pdf.open(pdf_path) as pdf:
         return len(pdf.pages)
+
+
+def _pdf_text(pdf_path: Path) -> str:
+    with fitz.open(str(pdf_path)) as pdf:
+        return "\n".join(page.get_text() for page in pdf)
 
 
 # --- DocxToPdfOperation ----------------------------------------------------
@@ -108,6 +125,80 @@ def test_docx_to_pdf_via_libreoffice(tmp_path: Path) -> None:
     result = session.apply(DocxToPdfOperation(source_path=source))
     assert _page_count(result.working_path) >= 1
     assert "LibreOffice" in result.operation_log[-1].describe()
+
+
+# The two tests above check that a PDF came out and which engine made
+# it, but never that the Word document's own content survived - a
+# converter that produced a blank page would pass both. These assert
+# the text actually lands in the output, for each engine separately.
+
+
+def test_docx_to_pdf_fallback_preserves_the_documents_text(
+    tmp_path: Path, force_fallback: None
+) -> None:
+    source = _make_docx(tmp_path / "in.docx")
+    session = _fresh_session(tmp_path)
+    result = session.apply(DocxToPdfOperation(source_path=source))
+    text = _pdf_text(result.working_path)
+    assert "Title" in text
+    assert "Hello from a test docx." in text
+    for cell in ("A", "B", "C", "D"):
+        assert cell in text
+
+
+@pytest.mark.skipif(not _HAS_LIBREOFFICE, reason="LibreOffice not installed on this machine")
+def test_docx_to_pdf_via_libreoffice_preserves_the_documents_text(tmp_path: Path) -> None:
+    source = _make_docx(tmp_path / "in.docx")
+    session = _fresh_session(tmp_path)
+    result = session.apply(DocxToPdfOperation(source_path=source))
+    text = _pdf_text(result.working_path)
+    assert "Title" in text
+    assert "Hello from a test docx." in text
+    for cell in ("A", "B", "C", "D"):
+        assert cell in text
+
+
+def test_docx_to_pdf_fallback_keeps_paragraphs_and_tables_in_document_order(
+    tmp_path: Path, force_fallback: None
+) -> None:
+    """Regression: the fallback used to walk `document.paragraphs` and
+    then `document.tables`, two collections that each flatten the body
+    separately - so a table sitting between two paragraphs came out
+    after both of them, silently reordering the document's content."""
+    source = _make_docx_with_a_table_between_paragraphs(tmp_path / "order.docx")
+    session = _fresh_session(tmp_path)
+    result = session.apply(DocxToPdfOperation(source_path=source))
+    text = _pdf_text(result.working_path)
+    assert (
+        text.index("PARA-BEFORE-TABLE") < text.index("TABLE-CELL") < text.index("PARA-AFTER-TABLE")
+    )
+
+
+@pytest.mark.skipif(not _HAS_LIBREOFFICE, reason="LibreOffice not installed on this machine")
+def test_both_docx_engines_agree_on_content_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback is a lower-fidelity reconstruction, but it must not
+    disagree with the primary engine about what order the content is
+    in - that's the one thing a text reconstruction has to get right.
+    Runs both engines on the same document rather than using the
+    module's `force_fallback` fixture, which is all-or-nothing."""
+    source = _make_docx_with_a_table_between_paragraphs(tmp_path / "order.docx")
+    markers = ("PARA-BEFORE-TABLE", "TABLE-CELL", "PARA-AFTER-TABLE")
+
+    libreoffice_result = _fresh_session(tmp_path, "lo").apply(
+        DocxToPdfOperation(source_path=source)
+    )
+    assert "LibreOffice" in libreoffice_result.operation_log[-1].describe()
+    libreoffice_text = _pdf_text(libreoffice_result.working_path)
+
+    monkeypatch.setattr("core.ops.convert_to.libreoffice_binary", lambda: None)
+    fallback_result = _fresh_session(tmp_path, "fb").apply(DocxToPdfOperation(source_path=source))
+    assert "pure-Python fallback" in fallback_result.operation_log[-1].describe()
+    fallback_text = _pdf_text(fallback_result.working_path)
+
+    assert [m for m in markers if m in libreoffice_text] == list(markers)
+    assert sorted(markers, key=libreoffice_text.index) == sorted(markers, key=fallback_text.index)
 
 
 # --- PptxToPdfOperation ------------------------------------------------------

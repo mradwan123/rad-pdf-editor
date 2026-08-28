@@ -28,6 +28,7 @@ from gui.controller import AppController
 from gui.dialogs.bates_numbering_dialog import BatesNumberingDialog
 from gui.dialogs.create_form_field_dialog import CreateFormFieldDialog
 from gui.dialogs.crop_dialog import CropDialog
+from gui.dialogs.docx_to_pdf_dialog import DocxToPdfDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
 from gui.dialogs.merge_dialog import MergeDialog
 from gui.dialogs.metadata_dialog import MetadataDialog
@@ -282,6 +283,94 @@ def test_merge_from_tools_menu_opens_a_document(qapp: QApplication, tmp_path: Pa
     assert window.controller.is_open
     assert window.thumbnail_list.count() == 3
     assert window.tool_actions["rotate_pages"].isEnabled()
+    _force_close(window)
+
+
+def _make_docx(path: Path, *, body: str = "WORD BODY TEXT") -> Path:
+    import docx
+
+    document = docx.Document()
+    document.add_paragraph(body)
+    document.save(str(path))
+    return path
+
+
+def _fake_docx_dialog_exec(source: Path) -> Any:
+    def fake_exec(self: DocxToPdfDialog) -> QDialog.DialogCode:
+        self._source_path = source
+        return QDialog.DialogCode.Accepted
+
+    return fake_exec
+
+
+def test_word_to_pdf_runs_with_no_document_open(qapp: QApplication, tmp_path: Path) -> None:
+    """Regression: every external-source tool used to be gated behind
+    "Open a document first" - only Merge was exempt - so Word to PDF was
+    unreachable from a freshly launched window, even though the CLI has
+    always accepted it with nothing open. Asserts the conversion really
+    lands in a new tab, not just that no error box appeared."""
+    source = _make_docx(tmp_path / "in.docx")
+    window = MainWindow()
+    assert window.tab_widget.count() == 0
+
+    errors: list[str] = []
+    with patch.object(
+        QMessageBox, "critical", lambda *args, **kwargs: errors.append(str(args[2]))
+    ), patch.object(DocxToPdfDialog, "exec", _fake_docx_dialog_exec(source)):
+        window._run_tool("docx_to_pdf", DocxToPdfDialog)
+
+    assert errors == []
+    assert window.tab_widget.count() == 1
+    controller = window.controller
+    assert controller is not None and controller.is_open
+    assert "Converted Word document to PDF" in controller.doc.operation_log[-1].describe()
+    assert window.thumbnail_list.count() >= 1
+    with pikepdf.Pdf.open(controller.doc.working_path) as pdf:
+        assert len(pdf.pages) >= 1
+    _force_close(window)
+
+
+def test_external_source_tools_stay_enabled_with_no_document_open(
+    qapp: QApplication,
+) -> None:
+    """The menu-item half of the same bug: `_update_action_state` used
+    to enable only "merge" when nothing was open, so the Word to PDF
+    action was greyed out and _run_tool's guard was never even
+    reachable from the Tools menu."""
+    window = MainWindow()
+    assert window.tab_widget.count() == 0
+
+    for tool_id in ("merge", "docx_to_pdf", "pptx_to_pdf", "xlsx_to_pdf", "html_to_pdf", "repair"):
+        assert window.tool_actions[tool_id].isEnabled(), f"{tool_id} should be usable with no document open"
+    # A tool that genuinely needs an open document stays disabled.
+    assert not window.tool_actions["rotate_pages"].isEnabled()
+    _force_close(window)
+
+
+def test_word_to_pdf_with_an_unreadable_source_does_not_strand_an_empty_tab(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """The no-document-open path creates the tab before the operation
+    runs; a source that fails to convert must not leave it behind.
+
+    The fallback engine is forced because LibreOffice is permissive
+    enough to convert a plain text file with a .docx name quite
+    happily - python-docx is the engine that rejects it.
+    """
+    not_a_docx = tmp_path / "broken.docx"
+    not_a_docx.write_text("this is plainly not a Word document")
+    window = MainWindow()
+
+    errors: list[str] = []
+    with (
+        patch.object(QMessageBox, "critical", lambda *args, **kwargs: errors.append(str(args[2]))),
+        patch.object(DocxToPdfDialog, "exec", _fake_docx_dialog_exec(not_a_docx)),
+        patch("core.ops.convert_to.libreoffice_binary", lambda: None),
+    ):
+        window._run_tool("docx_to_pdf", DocxToPdfDialog)
+
+    assert errors, "a failed conversion should report an error"
+    assert window.tab_widget.count() == 0
     _force_close(window)
 
 

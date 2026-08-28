@@ -27,6 +27,7 @@ from pathlib import Path
 from core.errors import PDFEditorError
 from core.logging_config import configure_logging, get_logger
 from core.model.document import DocumentSession
+from core.ops.common import EXTERNAL_SOURCE_TOOL_IDS
 from core.registry.registry import Registry, discover_and_load
 from core.security.sandbox import network_lockdown
 from core.session.audit_log import AuditLog
@@ -421,16 +422,10 @@ def _build_kwargs(args: argparse.Namespace) -> dict[str, object]:
 
 #: Tool ids whose source is one or more external files, not a PDF to
 #: open as the working document - mirrors MergeOperation's shape
-#: (core/ops/merge_split.py, core/ops/convert_to.py).
-_EXTERNAL_SOURCE_TOOL_IDS = {
-    "merge",
-    "docx_to_pdf",
-    "pptx_to_pdf",
-    "xlsx_to_pdf",
-    "html_to_pdf",
-    "jpg_to_pdf",
-    "repair",
-}
+#: (core/ops/merge_split.py, core/ops/convert_to.py). Shared with the
+#: GUI (gui/main_window.py) so the two can't drift; the list itself
+#: lives in core/ops/common.py.
+_EXTERNAL_SOURCE_TOOL_IDS = EXTERNAL_SOURCE_TOOL_IDS
 
 def _run_list_workflows() -> int:
     names = WorkflowStore().list_workflows()

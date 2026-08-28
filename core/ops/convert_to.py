@@ -30,6 +30,8 @@ import docx
 import fitz
 import openpyxl
 import pikepdf
+from docx.table import Table as DocxTable
+from docx.text.paragraph import Paragraph as DocxParagraph
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from reportlab.lib.pagesizes import letter
@@ -67,22 +69,44 @@ def _docx_fallback_to_pdf(source_path: Path, out_path: Path) -> None:
     """python-docx read -> reportlab platypus reconstruction. Font
     sizes/bold/italic run properties aren't mapped, and complex layout
     (columns, image text-wrap) isn't preserved - a text-and-tables
-    reconstruction, not a pixel-faithful one."""
+    reconstruction, not a pixel-faithful one.
+
+    Paragraphs and tables are walked over the document body's own child
+    elements rather than over `document.paragraphs` then
+    `document.tables`, because those two collections each flatten the
+    body separately: reading them in sequence emits every paragraph
+    first and every table afterwards, so a table sitting *between* two
+    paragraphs came out at the end of the PDF. Content order is the one
+    thing a text reconstruction has to get right, and LibreOffice (the
+    primary engine) preserves it, so the fallback must not silently
+    disagree with it.
+
+    Known limitation, deliberately not worked around here: the built-in
+    reportlab fonts are Latin-1, so characters outside it (CJK, and
+    other non-Latin scripts) do not survive - reportlab substitutes a
+    placeholder glyph rather than raising. Text in those scripts must
+    go through the LibreOffice engine, which handles it correctly.
+    """
     document = docx.Document(str(source_path))
     styles = getSampleStyleSheet()
     story: list[Any] = []
-    for para in document.paragraphs:
-        text = para.text
-        if not text.strip():
-            story.append(Spacer(1, 6))
-            continue
-        style_name = "Heading1" if para.style is not None and "Heading" in para.style.name else "Normal"
-        story.append(Paragraph(_xml_escape(text), styles[style_name]))
-    for table in document.tables:
-        data = [[cell.text for cell in row.cells] for row in table.rows]
-        if data:
-            story.append(Table(data))
-            story.append(Spacer(1, 12))
+    for child in document.element.body.iterchildren():
+        tag = child.tag.split("}")[-1]
+        if tag == "p":
+            para = DocxParagraph(child, document)
+            text = para.text
+            if not text.strip():
+                story.append(Spacer(1, 6))
+                continue
+            style_name = (
+                "Heading1" if para.style is not None and "Heading" in para.style.name else "Normal"
+            )
+            story.append(Paragraph(_xml_escape(text), styles[style_name]))
+        elif tag == "tbl":
+            data = [[cell.text for cell in row.cells] for row in DocxTable(child, document).rows]
+            if data:
+                story.append(Table(data))
+                story.append(Spacer(1, 12))
     if not story:
         story.append(Paragraph("", styles["Normal"]))
     SimpleDocTemplate(str(out_path), pagesize=letter).build(story)
