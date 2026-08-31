@@ -21,6 +21,7 @@ import pikepdf
 import pytest
 from PySide6.QtCore import QModelIndex, QPoint, QSize, Qt
 from PySide6.QtGui import QCloseEvent, QGuiApplication, QKeySequence
+from PySide6.QtPdf import QPdfDocument
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox
 
@@ -82,6 +83,24 @@ def _make_colored_pdf(path: Path, num_pages: int, color: tuple[float, float, flo
         page.draw_rect(fitz.Rect(20, 20, 280, 380), color=color, fill=color)
     doc.save(str(path))
     doc.close()
+    return path
+
+
+def _make_damaged_pdf(path: Path, color: tuple[float, float, float]) -> Path:
+    """A PDF that pikepdf reads happily but QtPdf refuses.
+
+    Truncating the file destroys the cross-reference table and trailer.
+    qpdf (behind pikepdf) reconstructs those, so `AppController.
+    open_document` succeeds and reports the real page count - while
+    QtPdf rejects the identical bytes with InvalidFileFormat. That
+    divergence between the two engines is the whole bug being guarded
+    here, so the fixture has to reproduce it rather than simulate it;
+    the assertions below confirm both halves really hold.
+    """
+    intact = path.with_name(f"intact_{path.name}")
+    _make_colored_pdf(intact, 2, color)
+    data = intact.read_bytes()
+    path.write_bytes(data[: int(len(data) * 0.85)])
     return path
 
 
@@ -265,6 +284,68 @@ def test_tool_actions_disabled_without_open_document_except_merge(qapp: QApplica
     assert not window.tool_actions["watermark"].isEnabled()
     assert window.tool_actions["merge"].isEnabled()
     window.close()
+
+
+def test_a_pdf_qtpdf_cannot_load_still_gets_thumbnails(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Regression: "I open a PDF and there is no thumbnail."
+
+    pikepdf repairs the damaged xref and opens the document, so a tab
+    appears with the right page count - but QtPdf rejected the same
+    bytes and `_render_thumbnails` logged one line and returned,
+    leaving an empty grid with nothing on screen explaining why.
+    """
+    damaged = _make_damaged_pdf(tmp_path / "damaged.pdf", (1, 0, 0))
+
+    # Both halves of the premise, so this can't rot into a test of a
+    # file that is simply fine.
+    with pikepdf.Pdf.open(damaged) as pdf:
+        assert len(pdf.pages) == 2
+    probe = QPdfDocument()
+    assert probe.load(str(damaged)) != QPdfDocument.Error.None_
+
+    window = MainWindow()
+    tab = _open_tab(window, damaged)
+
+    assert tab.controller.is_open
+    assert tab.thumbnail_list.count() == 2
+    # Rendered for real, not blank placeholders.
+    red, green, blue, _alpha = _thumbnail_center_pixel(tab, window)
+    assert red > 200 and green < 60 and blue < 60
+    _force_close(window)
+
+
+def test_an_undecodable_document_says_so_instead_of_showing_an_empty_grid(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """When neither engine can render, the status bar has to say so -
+    an empty grid with a "3 page(s)" message underneath reads as the
+    app being broken."""
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    assert tab.thumbnail_list.count() == 2
+
+    # Force both engines to fail: QtPdf rejects, then PyMuPDF raises.
+    def _fail_load(self: QPdfDocument, _path: str) -> QPdfDocument.Error:
+        return QPdfDocument.Error.InvalidFileFormat
+
+    with (
+        patch.object(QPdfDocument, "load", _fail_load),
+        patch("gui.main_window.fitz.open", side_effect=RuntimeError("no engine")),
+    ):
+        window._refresh()
+
+    assert tab.thumbnail_list.count() == 0
+    assert "Could not render" in window.statusBar().currentMessage()
+
+    # And it recovers: a later refresh with working engines renders
+    # again and drops the message.
+    window._refresh()
+    assert tab.thumbnail_list.count() == 2
+    assert "page(s)" in window.statusBar().currentMessage()
+    _force_close(window)
 
 
 def test_merge_from_tools_menu_opens_a_document(qapp: QApplication, tmp_path: Path) -> None:
