@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import fitz
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PySide6.QtPdf import QPdfDocument
@@ -114,6 +115,36 @@ _THUMBNAIL_ZOOM_STEP = 20
 _DIRTY_TAB_MARKER = "• "
 
 
+def _render_page_with_fitz(src: fitz.Document, index: int, size: QSize) -> QImage:
+    """Render one page to a QImage of at most `size` via PyMuPDF, for
+    documents QtPdf refuses to load (see
+    `MainWindow._render_thumbnails`).
+
+    Scaled down to the thumbnail size rather than returned at the
+    page's natural size: the caller composites the result at (0, 0) on
+    a thumbnail-sized canvas, so a full-resolution page would be
+    cropped to its top-left corner instead of shown. Aspect ratio is
+    kept, leaving the canvas's white showing around a page whose
+    proportions differ from the thumbnail's.
+
+    The QImage is `.copy()`d because constructing one over `samples`
+    does not take ownership of the buffer - the Pixmap owns it, and it
+    dies with this call, leaving the QImage pointing at freed memory.
+    """
+    page = src[index]
+    page_rect = page.rect
+    zoom = min(size.width() / page_rect.width, size.height() / page_rect.height)
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    image = QImage(
+        pixmap.samples,
+        pixmap.width,
+        pixmap.height,
+        pixmap.stride,
+        QImage.Format.Format_RGB888,
+    )
+    return image.copy()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -149,6 +180,10 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.empty_state)
         self.stack.addWidget(self.tab_widget)
         self.setCentralWidget(self.stack)
+
+        # Set by _render_tab; read by _refresh to say so in the status
+        # bar rather than showing an unexplained empty grid.
+        self._thumbnails_failed = False
 
         self.tool_actions: dict[str, QAction] = {}
         self._build_actions()
@@ -1201,9 +1236,21 @@ class MainWindow(QMainWindow):
         if tab is not None:
             self._render_tab(tab)
             self.setWindowTitle(f"{_APP_NAME} - {tab.document_name()}")
-            self.statusBar().showMessage(
-                self.tr("{0} page(s)").format(tab.thumbnail_list.count())
-            )
+            if self._thumbnails_failed:
+                # Never leave an empty grid unexplained: before this,
+                # a document QtPdf could not render showed no pages and
+                # no reason, which reads as the app being broken.
+                # Deliberately the status bar and not a modal dialog -
+                # _refresh runs on every operation, undo, redo and tab
+                # change, and a modal here would fire repeatedly (and
+                # hang the headless suite).
+                self.statusBar().showMessage(
+                    self.tr("Could not render page thumbnails for this document.")
+                )
+            else:
+                self.statusBar().showMessage(
+                    self.tr("{0} page(s)").format(tab.thumbnail_list.count())
+                )
             self.stack.setCurrentWidget(self.tab_widget)
         else:
             self.setWindowTitle(_APP_NAME)
@@ -1216,9 +1263,32 @@ class MainWindow(QMainWindow):
         tab.thumbnail_list.clear()
         working_path = tab.controller.doc.working_path
         if tab.controller.is_open and working_path is not None:
-            self._render_thumbnails(tab.thumbnail_list, working_path)
+            self._thumbnails_failed = not self._render_thumbnails(
+                tab.thumbnail_list, working_path
+            )
+        else:
+            self._thumbnails_failed = False
 
-    def _render_thumbnails(self, thumbnail_list: QListWidget, path: Path) -> None:
+    def _render_thumbnails(self, thumbnail_list: QListWidget, path: Path) -> bool:
+        """Fill `thumbnail_list` with one icon per page. Returns False
+        if no engine could render the document at all.
+
+        Two engines, because they genuinely disagree about which files
+        are readable. The app opens and validates documents with pikepdf
+        (qpdf), which silently repairs a damaged cross-reference table,
+        so a truncated PDF opens perfectly happily and reports its real
+        page count - while QtPdf rejects the identical file outright
+        with InvalidFileFormat. That combination used to log one line
+        and return, leaving a document that was "open" with an
+        empty grid and nothing on screen explaining why: the reported
+        "I open a PDF and there is no thumbnail" bug, reproduced exactly
+        against a PDF truncated to 85% of its length.
+
+        QtPdf stays the primary engine (unchanged for every file that
+        already worked). PyMuPDF - already a dependency, and the same
+        renderer the conversion ops use - is tried only when QtPdf
+        refuses, and renders those damaged files fine.
+        """
         # No parent: this is a short-lived, throwaway document used
         # only to render thumbnails for this one _refresh() call. A
         # `self`-parented QPdfDocument would live as long as
@@ -1226,30 +1296,48 @@ class MainWindow(QMainWindow):
         # instance per call (every operation/undo/redo triggers a
         # _refresh()), unbounded over a session.
         pdf_doc = QPdfDocument()
-        if pdf_doc.load(str(path)) != QPdfDocument.Error.None_:
-            log.error("Could not load PDF for thumbnail rendering: %s", path)
-            return
-        for i in range(pdf_doc.pageCount()):
-            rendered = pdf_doc.render(i, self.thumbnail_size)
-            # QtPdf leaves any unpainted area of the page fully
-            # transparent (alpha=0) rather than opaque white - most
-            # visible on blank/near-empty pages. Composite onto a
-            # white backdrop so a thumbnail always reads as a page,
-            # not as "nothing" wherever the source PDF painted nothing.
-            page_image = QImage(self.thumbnail_size, QImage.Format.Format_ARGB32_Premultiplied)
-            page_image.fill(Qt.GlobalColor.white)
-            painter = QPainter(page_image)
-            painter.drawImage(0, 0, rendered)
-            painter.end()
-            item = QListWidgetItem(
-                QIcon(QPixmap.fromImage(page_image)), self.tr("Page {0}").format(i + 1)
-            )
-            # Tracks which page this item represents in the *current*
-            # working document, independent of drag position - read
-            # back in visual order by _apply_thumbnail_reorder to
-            # build the ReorderPagesOperation's page_order.
-            item.setData(Qt.ItemDataRole.UserRole, i + 1)
-            thumbnail_list.addItem(item)
+        if pdf_doc.load(str(path)) == QPdfDocument.Error.None_:
+            for i in range(pdf_doc.pageCount()):
+                self._add_thumbnail(thumbnail_list, pdf_doc.render(i, self.thumbnail_size), i)
+            return True
+
+        log.warning(
+            "QtPdf could not load '%s' for thumbnails; falling back to PyMuPDF.", path
+        )
+        try:
+            with fitz.open(str(path)) as src:
+                for i in range(src.page_count):
+                    self._add_thumbnail(
+                        thumbnail_list,
+                        _render_page_with_fitz(src, i, self.thumbnail_size),
+                        i,
+                    )
+                rendered_any = src.page_count > 0
+        except Exception:
+            log.exception("No engine could render thumbnails for '%s'", path)
+            return False
+        return rendered_any
+
+    def _add_thumbnail(self, thumbnail_list: QListWidget, rendered: QImage, index: int) -> None:
+        # QtPdf leaves any unpainted area of the page fully
+        # transparent (alpha=0) rather than opaque white - most
+        # visible on blank/near-empty pages. Composite onto a
+        # white backdrop so a thumbnail always reads as a page,
+        # not as "nothing" wherever the source PDF painted nothing.
+        page_image = QImage(self.thumbnail_size, QImage.Format.Format_ARGB32_Premultiplied)
+        page_image.fill(Qt.GlobalColor.white)
+        painter = QPainter(page_image)
+        painter.drawImage(0, 0, rendered)
+        painter.end()
+        item = QListWidgetItem(
+            QIcon(QPixmap.fromImage(page_image)), self.tr("Page {0}").format(index + 1)
+        )
+        # Tracks which page this item represents in the *current*
+        # working document, independent of drag position - read
+        # back in visual order by _apply_thumbnail_reorder to
+        # build the ReorderPagesOperation's page_order.
+        item.setData(Qt.ItemDataRole.UserRole, index + 1)
+        thumbnail_list.addItem(item)
 
     def _on_thumbnails_reordered(self, tab: DocumentTab) -> None:
         # Deferred to the next event loop turn: applying an operation

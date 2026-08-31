@@ -2516,3 +2516,66 @@ CLI for the fixed paths.
 
 Full suite: **578 passed** (567 + 11 new), `ruff check .` clean,
 `mypy core cli gui` clean.
+
+## "I open a PDF and there is no thumbnail" - two PDF engines disagreeing
+
+User report, reproduced exactly and fixed. The cause is that this app
+reads PDFs with **two different engines that do not agree about which
+files are readable**:
+
+- `pikepdf`/qpdf opens and validates the document. qpdf silently
+  *reconstructs* a damaged cross-reference table, so a truncated file
+  opens fine and reports its true page count.
+- `QtPdf` renders the thumbnails, and rejects that same file outright
+  with `InvalidFileFormat`.
+
+`_render_thumbnails` logged one line and returned on a load failure, so
+the result was a tab that was genuinely "open", with the correct
+document name, an empty thumbnail grid, and **nothing on screen saying
+why** - which reads as the whole app being broken. Reproduced against a
+PDF truncated to 85% of its length: `pikepdf` reports 2 pages, `QtPdf`
+returns `InvalidFileFormat`, grid shows 0 thumbnails, no dialog.
+
+Worth recording which PDFs actually diverge, since it was measured
+rather than guessed (`QtPdf.load` vs `pikepdf.Pdf.open`):
+
+| PDF | pikepdf | QtPdf |
+| --- | --- | --- |
+| plain | opens | `None_` (fine) |
+| owner-password only (opens without a password) | opens | fine |
+| user-password encrypted | `PasswordError` | `IncorrectPassword` |
+| truncated / damaged | **opens, 2 pages** | **`InvalidFileFormat`** |
+
+Only the last row is the silent-failure case: the encrypted row fails
+in *both* engines, so `open_document` raises and the user gets a proper
+error already.
+
+**Fix**: QtPdf stays the primary renderer, unchanged for every file
+that already worked. When it refuses, `_render_thumbnails` falls back
+to **PyMuPDF** - already a dependency, already the renderer the
+conversion ops use - which renders those damaged files perfectly
+(verified: correct page count and correct pixel colours). If *both*
+engines fail, `_refresh` now says so in the status bar instead of
+leaving an unexplained empty grid.
+
+Two implementation details that matter:
+
+- The fallback renders at a **zoom matrix scaled to the thumbnail
+  size**, not at the page's natural size. `_add_thumbnail` composites
+  at (0, 0) onto a thumbnail-sized canvas, so a full-resolution page
+  would have been *cropped to its top-left corner* rather than scaled.
+  Caught by looking at the first version's output rather than assuming.
+- The `QImage` built over `pixmap.samples` is `.copy()`d. That
+  constructor does not take ownership of the buffer - the fitz Pixmap
+  owns it and dies at the end of the call, which would leave the
+  QImage pointing at freed memory.
+
+The status-bar message is deliberately **not** a modal dialog:
+`_refresh` runs on every operation, undo, redo and tab change, so a
+modal would fire repeatedly - and would hang the headless suite, the
+trap this file already documents twice.
+
+Full suite: **580 passed** - 562 on this fix's own branch (560 + 2
+new), then 580 once merged with the conversion-audit work above, which
+had landed on `main` meanwhile. `ruff check .` clean,
+`mypy core cli gui` clean.
