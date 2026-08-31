@@ -44,6 +44,7 @@ from core.document_info import DocumentInfo, read_document_info
 from core.errors import OperationError, PDFEditorError
 from core.logging_config import get_logger
 from core.model.document import DocumentSession
+from core.ops.common import EXTERNAL_SOURCE_TOOL_IDS
 from core.ops.forms import list_form_field_names
 from core.registry.registry import Registry, discover_and_load
 from core.session.audit_log import AuditLog
@@ -1077,7 +1078,14 @@ class MainWindow(QMainWindow):
 
     def _run_tool(self, tool_id: str, dialog_cls: DialogFactory) -> None:
         tab = self.current_tab
-        if tool_id != "merge" and (tab is None or not tab.controller.is_open):
+        # Every external-source tool works with nothing open - its input
+        # is a file the dialog picks, not the current document - and the
+        # created_tab branch below already builds a fresh tab for that
+        # case generically. This used to exempt only "merge", so Word to
+        # PDF (and PowerPoint/Excel/HTML/JPG to PDF, and Repair) were
+        # unreachable from a freshly launched window even though the CLI
+        # has always supported running them with no document open.
+        if tool_id not in EXTERNAL_SOURCE_TOOL_IDS and (tab is None or not tab.controller.is_open):
             self._show_error_message(self.tr("Open a document first."))
             return
 
@@ -1119,10 +1127,12 @@ class MainWindow(QMainWindow):
                 return
             created_tab = tab is None
             if created_tab:
-                # Merge with no tabs open: it builds a document from
-                # scratch, so it gets a fresh tab - created only now
-                # that the dialog was actually accepted, so a cancelled
-                # Merge can't strand an empty tab. activate=False:
+                # An external-source tool (Merge, Word/PowerPoint/Excel/
+                # HTML/JPG to PDF, Repair) run with no tabs open: it
+                # builds a document from scratch, so it gets a fresh tab
+                # - created only now that the dialog was actually
+                # accepted, so a cancelled dialog can't strand an empty
+                # tab. activate=False:
                 # don't switch to (and render) it until apply_operation
                 # below actually succeeds - see _add_tab's docstring
                 # for the black-empty-tab bug this avoids.
@@ -1135,8 +1145,9 @@ class MainWindow(QMainWindow):
                     tab.controller.apply_operation(operation)
             except PDFEditorError as exc:
                 if created_tab:
-                    # Don't strand an empty tab for a Merge that built
-                    # nothing (e.g. every input file was invalid).
+                    # Don't strand an empty tab for a tool that built
+                    # nothing (e.g. every Merge input was invalid, or
+                    # the chosen Word document turned out unreadable).
                     self._discard_tab(tab)
                 self._show_error(exc)
                 return
@@ -1407,7 +1418,13 @@ class MainWindow(QMainWindow):
         self.undo_action.setEnabled(controller is not None and controller.can_undo)
         self.redo_action.setEnabled(controller is not None and controller.can_redo)
         for tool_id, action in self.tool_actions.items():
-            action.setEnabled(is_open or tool_id == "merge")
+            # Same rule as _run_tool's guard, and for the same reason:
+            # an external-source tool takes its input from a file the
+            # dialog picks, so it stays usable with nothing open. This
+            # used to enable only "merge", which greyed Word to PDF (and
+            # the other four to-PDF conversions, and Repair) out of the
+            # Tools menu entirely on a freshly launched window.
+            action.setEnabled(is_open or tool_id in EXTERNAL_SOURCE_TOOL_IDS)
 
     # --- error display -----------------------------------------------------------
 

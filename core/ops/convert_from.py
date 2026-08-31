@@ -129,20 +129,41 @@ class PdfToPptxOperation(Operation):
             total = src.page_count
             prs = Presentation()
             blank_layout = prs.slide_layouts[6]
+            # A pptx has exactly ONE slide size for the whole deck - a
+            # format constraint, not a python-pptx gap. This used to be
+            # reassigned inside the loop, so a mixed-page-size PDF ended
+            # up with every slide sized to the *last* page: a 300x400
+            # page's image was emitted at 300x400pt onto an 800x300pt
+            # slide, hanging off the bottom. The first page sets the
+            # deck size (identical to the old behaviour for the usual
+            # uniform-size document) and every page is then fitted into
+            # it, preserving aspect ratio and centred, so no page can
+            # overflow its slide.
+            slide_width_pt = src[0].rect.width if total else 0.0
+            slide_height_pt = src[0].rect.height if total else 0.0
+            prs.slide_width = Emu(round(slide_width_pt * _EMU_PER_POINT))
+            prs.slide_height = Emu(round(slide_height_pt * _EMU_PER_POINT))
             for i in range(total):
                 page_rect = src[i].rect
-                prs.slide_width = Emu(round(page_rect.width * _EMU_PER_POINT))
-                prs.slide_height = Emu(round(page_rect.height * _EMU_PER_POINT))
                 image_path = doc.working_path.parent / f"pdf_to_pptx_p{i}.png"
                 render_pdf_page_to_image(doc.working_path, i, self.dpi, image_path)
+                scale = min(
+                    slide_width_pt / page_rect.width, slide_height_pt / page_rect.height
+                )
+                draw_width = page_rect.width * scale
+                draw_height = page_rect.height * scale
                 slide = prs.slides.add_slide(blank_layout)
                 slide.shapes.add_picture(
                     str(image_path),
-                    0,
-                    0,
-                    width=Emu(round(page_rect.width * _EMU_PER_POINT)),
-                    height=Emu(round(page_rect.height * _EMU_PER_POINT)),
+                    Emu(round((slide_width_pt - draw_width) / 2 * _EMU_PER_POINT)),
+                    Emu(round((slide_height_pt - draw_height) / 2 * _EMU_PER_POINT)),
+                    width=Emu(round(draw_width * _EMU_PER_POINT)),
+                    height=Emu(round(draw_height * _EMU_PER_POINT)),
                 )
+                # add_picture has already copied the bytes into the
+                # presentation package, so the intermediate render is
+                # dead weight in the session dir from here on.
+                image_path.unlink(missing_ok=True)
         prs.save(str(out_path))
 
         return next_session(doc, out_path)

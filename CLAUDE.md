@@ -2361,6 +2361,162 @@ platform-dependent substring check wearing a disguise, and a test that
 disables one branch of a fallback chain has to disable the others too
 or it silently tests something else.
 
+## Word to PDF audit: two real bugs found, both fixed
+
+An audit of the Word<->PDF path (asked for as "check all the word to
+pdf functionality and do tests to make sure it works"). The primary
+engine was already correct; the bugs were in the GUI's reachability of
+the feature and in the fallback engine's fidelity.
+
+**The existing tests could not have caught either.**
+`test_docx_to_pdf_fallback_produces_valid_pdf` and
+`test_docx_to_pdf_via_libreoffice` asserted only `page_count >= 1` and
+which engine ran - a converter emitting a blank page passed both. The
+content assertions that should have been there are now added, per
+engine (`test_docx_to_pdf_*_preserves_the_documents_text`).
+
+**Bug 1 - Word to PDF was unreachable from a freshly launched window.**
+Two layers, both keyed on the same merge-only exemption:
+`_update_action_state` did `action.setEnabled(is_open or tool_id ==
+"merge")`, so Tools > Convert to PDF > Word to PDF was *greyed out*
+with no document open; and `_run_tool`'s guard did `tool_id !=
+"merge"`, so even reaching it showed "Open a document first." But
+`docx_to_pdf` is an external-source operation - its input is the file
+the dialog picks, not the open document - and the CLI has always
+accepted it with nothing open (`_EXTERNAL_SOURCE_TOOL_IDS`). The same
+applied to `pptx_to_pdf`/`xlsx_to_pdf`/`html_to_pdf`/`jpg_to_pdf`/
+`repair`; Repair is the sharpest case, since its whole purpose is a
+file that won't open normally.
+
+The `created_tab` machinery in `_run_tool` was already generic (it
+builds a fresh tab, discards it on failure) - only the two guards were
+merge-specific, so the fix is membership tests, not new plumbing. The
+list moved to `core/ops/common.py`'s `EXTERNAL_SOURCE_TOOL_IDS` and
+`cli/main.py` now aliases it, so the CLI and GUI cannot drift apart -
+that drift is exactly what caused this.
+
+**Bug 2 - the pure-Python fallback silently reordered document
+content.** `_docx_fallback_to_pdf` walked `document.paragraphs` and
+then `document.tables`. Those two collections each flatten the body
+independently, so a table sitting *between* two paragraphs was emitted
+after both of them. Confirmed against real output, not read: a docx of
+para/table/para came back from the fallback as para/para/table while
+LibreOffice preserved the real order. Fixed by iterating
+`document.element.body.iterchildren()` and dispatching on the `w:p` /
+`w:tbl` tag, building `DocxParagraph`/`DocxTable` per child (imported
+under aliases - `Paragraph`/`Table` in that module are reportlab's).
+Content order is the one thing a text reconstruction must get right,
+and the two engines must not disagree about it -
+`test_both_docx_engines_agree_on_content_order` pins exactly that.
+
+Both regressions were verified to actually fail against the pre-fix
+code before being kept (stash the fix, run, confirm the failure names
+the real symptom - `enabled=false` for the greyed action, the
+para/table order inversion for the fallback), not just to pass after.
+
+**Known limitation, now documented rather than discovered again**: the
+fallback's reportlab built-in fonts are Latin-1, so CJK and other
+non-Latin scripts do not survive it - reportlab substitutes a
+placeholder glyph and does *not* raise (measured: a two-character CJK
+word came out as "nn", silently). Not worked around here: doing it
+properly means embedding a CJK-capable font, and the primary
+LibreOffice engine handles the same text correctly (verified - a full
+round trip docx -> pdf -> docx preserved accented Latin, CJK,
+em-dashes and table cells intact). Recorded in
+`_docx_fallback_to_pdf`'s docstring, same transparency convention as
+Grayscale's rasterization tradeoff.
+
+Everything else checked and found already correct, not assumed:
+LibreOffice engine content/page-count/CJK fidelity, the CLI in both
+directions, GUI Word->PDF with a document already open, plugin
+registration and Tools-menu grouping for both `docx_to_pdf` and
+`pdf_to_docx`, error wrapping (`DocumentSession.apply` turns
+python-docx's `PackageNotFoundError` into `OperationError`, which the
+GUI catches), and the PDF->Word GUI export path (already well covered
+by the `_EXPORT_TOOLS` work).
+
+Full suite: **567 passed** (560 baseline + 7 new), `ruff check .`
+clean, `mypy core cli gui` clean.
+
+## The rest of the conversion suite, audited the same way
+
+Extending the Word audit to the other four `*->PDF` conversions and
+the whole `PDF->*` direction. The weak-assertion pattern was
+suite-wide, not a Word oversight: **every** conversion test asserted
+only page count and engine name. `test_jpg_to_pdf_combines_images_into_
+one_pdf` is the starkest - it asserted a two-page PDF came out, which
+two blank pages satisfy; nothing checked an image was embedded at all.
+
+Content is correct in both engines for all four (verified against real
+extracted text, and real centre-pixel colours for JPG, which also
+confirmed page order follows source order). The bugs were all in the
+**pure-Python fallbacks disagreeing with LibreOffice**, and in one
+`PDF->*` operation:
+
+- **PPTX fallback dropped table shapes entirely.** A slide whose
+  content was a table converted to a genuinely blank page while
+  LibreOffice rendered all four cells. The docstring's "other shape
+  types (charts, SmartArt, ...) are skipped" did not cover this and
+  should not have: a table is *text*, which is exactly what the
+  reconstruction exists to preserve. Now drawn on an even grid inside
+  the shape's own rect (`_draw_pptx_table`); borders/fills aren't
+  reproduced, same bargain as the rest of the fallback.
+- **PPTX fallback never wrapped text.** `Canvas.drawString` does no
+  wrapping at all, so a text frame longer than its box was drawn as
+  one unbroken line running off the slide - measured, 101 of 122 words
+  past the right edge. Now `simpleSplit` against the same font/size the
+  text is drawn in (`_draw_wrapped_text`); that font is pinned in a
+  constant because measuring and drawing must agree or the wrap width
+  is meaningless.
+- **XLSX fallback ran wide sheets off both edges.** A bare
+  `Table(data)` sizes columns to their widest cell with no upper
+  bound: a 25-column sheet put 12 of 51 words off the page, and a
+  single 400-character cell reached x1=2980 on a 612pt page.
+
+  Worth recording is the *second* attempt here, because the first fix
+  was wrong in an instructive way. Fitting all columns into one page
+  width plus `splitLongWords=True` did put everything on the page - and
+  chopped values mid-word, `COL00` rendering as `C`/`OL`/`00`, which a
+  test caught immediately. 25 columns across a 540pt frame is ~21pt
+  each, narrower than a 5-character heading. LibreOffice paginates the
+  same sheet instead, so the fallback now splits a wide sheet into
+  column groups (`_SHEET_MIN_COLUMN_WIDTH`) rather than squeezing it.
+  Values stay intact; a normal-width sheet is a single group and is
+  unchanged.
+
+- **`PdfToPptxOperation` sized every slide to the *last* page.**
+  `slide_width`/`slide_height` are presentation-level (a pptx format
+  constraint, not a python-pptx gap) but were assigned inside the
+  per-page loop. A 300x400 page's image was emitted at 300x400pt onto
+  an 800x300pt slide, hanging off it - real for any report with one
+  landscape chart page. The first page now sets the deck size and every
+  page is fitted into it, aspect preserved and centred. Verified that
+  the ordinary uniform-size document is byte-for-byte unaffected
+  (picture at (0,0), exactly slide-sized), since that is the case that
+  must not regress.
+- **`PdfToPptxOperation` left its intermediate page PNGs** in the
+  session dir. They were wiped with the session, so not a leak, just
+  residue - `add_picture` has already copied the bytes into the package
+  by then, so they're unlinked immediately now.
+
+**A testing lesson worth keeping: fitz and pdfplumber do not agree
+about what is off-page.** The off-page helper was written with
+`fitz.get_text("words")` first, and it silently *passed* against the
+unfixed long-cell case that pdfplumber measured at x1=2980 - i.e. a
+regression test that could never fail. Caught only by running each new
+test against the pre-fix code (the discipline from the Word audit) and
+noticing one of them passed when it should not have. `_words_off_page`
+uses pdfplumber for this reason, and says so.
+
+Also confirmed correct and left alone: HTML->PDF both engines
+(including the existing remote-resource rejection and data-URI tests),
+`PdfToDocx`/`PdfToHtml`/`PdfToXlsx` content, `PdfToXlsx` on a PDF with
+no detectable tables (an empty default sheet, not a crash), and the
+CLI for the fixed paths.
+
+Full suite: **578 passed** (567 + 11 new), `ruff check .` clean,
+`mypy core cli gui` clean.
+
 ## "I open a PDF and there is no thumbnail" - two PDF engines disagreeing
 
 User report, reproduced exactly and fixed. The cause is that this app
@@ -2419,5 +2575,7 @@ The status-bar message is deliberately **not** a modal dialog:
 modal would fire repeatedly - and would hang the headless suite, the
 trap this file already documents twice.
 
-Full suite: **562 passed** (560 + 2 new), `ruff check .` clean,
+Full suite: **580 passed** - 562 on this fix's own branch (560 + 2
+new), then 580 once merged with the conversion-audit work above, which
+had landed on `main` meanwhile. `ruff check .` clean,
 `mypy core cli gui` clean.

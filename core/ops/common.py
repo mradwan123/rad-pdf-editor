@@ -23,6 +23,26 @@ from core.errors import CorruptDocumentError, OperationError
 from core.model.document import DocumentSession
 from core.model.operation import Operation
 
+#: Tool ids whose source is one or more *external* files rather than
+#: the currently-open document - MergeOperation's shape (see
+#: core/ops/merge_split.py and core/ops/convert_to.py). Two callers
+#: need this same membership and must not drift apart: the CLI points
+#: a fresh working_path at the session dir before apply() for these
+#: (allocate_working_path would otherwise fall back to the OS temp
+#: root), and the GUI must not gate them behind "Open a document
+#: first" - they are usable, by design, with nothing open at all.
+EXTERNAL_SOURCE_TOOL_IDS = frozenset(
+    {
+        "merge",
+        "docx_to_pdf",
+        "pptx_to_pdf",
+        "xlsx_to_pdf",
+        "html_to_pdf",
+        "jpg_to_pdf",
+        "repair",
+    }
+)
+
 
 def open_pdf(path: Path) -> pikepdf.Pdf:
     """Open `path` with pikepdf, translating library/OS errors into the

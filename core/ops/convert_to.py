@@ -30,11 +30,13 @@ import docx
 import fitz
 import openpyxl
 import pikepdf
+from docx.table import Table as DocxTable
+from docx.text.paragraph import Paragraph as DocxParagraph
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.utils import ImageReader
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.utils import ImageReader, simpleSplit
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table
 from xhtml2pdf import pisa
@@ -57,6 +59,24 @@ CORE_VERSION_RANGE = ">=1.0,<2.0"
 #: positions into reportlab's point-based coordinate system.
 _POINTS_PER_EMU = 1 / 12700
 
+#: The font the canvas-drawing fallbacks measure and draw with. Set
+#: explicitly rather than relying on the reportlab canvas default,
+#: because `simpleSplit` has to wrap against the *same* font/size the
+#: text is finally drawn in or the wrap width is meaningless.
+_FALLBACK_FONT = "Helvetica"
+_FALLBACK_FONT_SIZE = 12
+_FALLBACK_LINE_HEIGHT = 14
+
+#: Spreadsheet cells are rendered smaller than body text so a sheet
+#: with many columns still fits the printable width legibly, and the
+#: page margin the column widths are computed against.
+_SHEET_CELL_FONT_SIZE = 7
+_SHEET_MARGIN = 36
+#: Narrowest a spreadsheet column may get before the sheet is split
+#: into further column groups instead - below roughly this, ordinary
+#: cell values start breaking mid-word to fit.
+_SHEET_MIN_COLUMN_WIDTH = 45
+
 
 def _require_source_file(path: Path) -> None:
     if not path.is_file():
@@ -67,32 +87,117 @@ def _docx_fallback_to_pdf(source_path: Path, out_path: Path) -> None:
     """python-docx read -> reportlab platypus reconstruction. Font
     sizes/bold/italic run properties aren't mapped, and complex layout
     (columns, image text-wrap) isn't preserved - a text-and-tables
-    reconstruction, not a pixel-faithful one."""
+    reconstruction, not a pixel-faithful one.
+
+    Paragraphs and tables are walked over the document body's own child
+    elements rather than over `document.paragraphs` then
+    `document.tables`, because those two collections each flatten the
+    body separately: reading them in sequence emits every paragraph
+    first and every table afterwards, so a table sitting *between* two
+    paragraphs came out at the end of the PDF. Content order is the one
+    thing a text reconstruction has to get right, and LibreOffice (the
+    primary engine) preserves it, so the fallback must not silently
+    disagree with it.
+
+    Known limitation, deliberately not worked around here: the built-in
+    reportlab fonts are Latin-1, so characters outside it (CJK, and
+    other non-Latin scripts) do not survive - reportlab substitutes a
+    placeholder glyph rather than raising. Text in those scripts must
+    go through the LibreOffice engine, which handles it correctly.
+    """
     document = docx.Document(str(source_path))
     styles = getSampleStyleSheet()
     story: list[Any] = []
-    for para in document.paragraphs:
-        text = para.text
-        if not text.strip():
-            story.append(Spacer(1, 6))
-            continue
-        style_name = "Heading1" if para.style is not None and "Heading" in para.style.name else "Normal"
-        story.append(Paragraph(_xml_escape(text), styles[style_name]))
-    for table in document.tables:
-        data = [[cell.text for cell in row.cells] for row in table.rows]
-        if data:
-            story.append(Table(data))
-            story.append(Spacer(1, 12))
+    for child in document.element.body.iterchildren():
+        tag = child.tag.split("}")[-1]
+        if tag == "p":
+            para = DocxParagraph(child, document)
+            text = para.text
+            if not text.strip():
+                story.append(Spacer(1, 6))
+                continue
+            style_name = (
+                "Heading1" if para.style is not None and "Heading" in para.style.name else "Normal"
+            )
+            story.append(Paragraph(_xml_escape(text), styles[style_name]))
+        elif tag == "tbl":
+            data = [[cell.text for cell in row.cells] for row in DocxTable(child, document).rows]
+            if data:
+                story.append(Table(data))
+                story.append(Spacer(1, 12))
     if not story:
         story.append(Paragraph("", styles["Normal"]))
     SimpleDocTemplate(str(out_path), pagesize=letter).build(story)
 
 
+def _draw_pptx_table(
+    pdf_canvas: canvas.Canvas,
+    table: Any,
+    left: float,
+    bottom_y: float,
+    shape_width: float,
+    shape_height: float,
+) -> None:
+    """Draw a slide table's cell text on an even grid inside the shape's
+    own rectangle. Cell borders/fills aren't reproduced - this recovers
+    the table's *text*, positioned roughly where it belongs, which is
+    the same bargain the rest of this fallback makes."""
+    rows = list(table.rows)
+    columns = list(table.columns)
+    if not rows or not columns:
+        return
+    cell_width = shape_width / len(columns)
+    cell_height = shape_height / len(rows)
+    for row_index, _row in enumerate(rows):
+        # Rows run top-to-bottom; the shape's y is its *bottom* edge.
+        row_top = bottom_y + shape_height - row_index * cell_height
+        for column_index in range(len(columns)):
+            text = table.cell(row_index, column_index).text
+            if not text.strip():
+                continue
+            _draw_wrapped_text(
+                pdf_canvas,
+                text,
+                left + column_index * cell_width,
+                row_top - _FALLBACK_LINE_HEIGHT,
+                max(cell_width, _FALLBACK_LINE_HEIGHT),
+            )
+
+
+def _draw_wrapped_text(
+    pdf_canvas: canvas.Canvas, text: str, left: float, top_y: float, max_width: float
+) -> None:
+    """Draw `text` at (left, top_y) wrapped to `max_width`, one line per
+    rendered row, growing downward.
+
+    `Canvas.drawString` does no wrapping whatsoever: a text frame's
+    contents were previously emitted as a single unbroken line, so
+    anything longer than its box ran clean off the right edge of the
+    slide and out of the page. The text was still in the PDF's text
+    layer (extraction found it) but was invisible to a reader, which is
+    the failure mode that makes it worth wrapping rather than leaving
+    to "approximate positions".
+    """
+    lines = simpleSplit(text, _FALLBACK_FONT, _FALLBACK_FONT_SIZE, max_width)
+    y = top_y
+    for line in lines:
+        pdf_canvas.drawString(left, y, line)
+        y -= _FALLBACK_LINE_HEIGHT
+
+
 def _pptx_fallback_to_pdf(source_path: Path, out_path: Path) -> None:
-    """python-pptx read -> one reportlab page per slide, text frames
-    and picture shapes positioned via EMU->pt conversion. Approximate
-    positions, not a pixel-exact slide renderer (python-pptx has none)
-    - other shape types (charts, SmartArt, ...) are skipped."""
+    """python-pptx read -> one reportlab page per slide, text frames,
+    tables and picture shapes positioned via EMU->pt conversion.
+    Approximate positions, not a pixel-exact slide renderer (python-pptx
+    has none) - genuinely graphical shape types (charts, SmartArt, ...)
+    are skipped, since there is nothing textual to recover from them.
+
+    Table shapes are *not* in that skipped category, though they used to
+    be: a table is text, which is exactly what this reconstruction
+    exists to preserve, and LibreOffice renders it - so dropping it
+    silently made the two engines disagree about the slide's content,
+    not merely about its fidelity.
+    """
     prs = Presentation(str(source_path))
     # A loaded/created Presentation always has these set from its
     # template; None is only in the type stubs for the pathological
@@ -102,6 +207,7 @@ def _pptx_fallback_to_pdf(source_path: Path, out_path: Path) -> None:
     width_pt = prs.slide_width * _POINTS_PER_EMU
     height_pt = prs.slide_height * _POINTS_PER_EMU
     pdf_canvas = canvas.Canvas(str(out_path), pagesize=(width_pt, height_pt))
+    pdf_canvas.setFont(_FALLBACK_FONT, _FALLBACK_FONT_SIZE)
     for slide in prs.slides:
         for shape in slide.shapes:
             if shape.left is None or shape.top is None:
@@ -116,8 +222,16 @@ def _pptx_fallback_to_pdf(source_path: Path, out_path: Path) -> None:
                 pdf_canvas.drawImage(
                     ImageReader(image_stream), left, y, width=shape_width, height=shape_height
                 )
+            elif getattr(shape, "has_table", False):
+                _draw_pptx_table(pdf_canvas, shape.table, left, y, shape_width, shape_height)
             elif shape.has_text_frame and shape.text_frame.text:
-                pdf_canvas.drawString(left, y + max(shape_height - 14, 0), shape.text_frame.text)
+                _draw_wrapped_text(
+                    pdf_canvas,
+                    shape.text_frame.text,
+                    left,
+                    y + max(shape_height - _FALLBACK_LINE_HEIGHT, 0),
+                    max(shape_width, _FALLBACK_LINE_HEIGHT),
+                )
         pdf_canvas.showPage()
     pdf_canvas.save()
 
@@ -125,19 +239,70 @@ def _pptx_fallback_to_pdf(source_path: Path, out_path: Path) -> None:
 def _xlsx_fallback_to_pdf(source_path: Path, out_path: Path) -> None:
     """openpyxl read -> one reportlab Table per worksheet. No cell
     styling/merged-cell visual fidelity beyond plain text; charts and
-    embedded images in the workbook are not rendered."""
+    embedded images in the workbook are not rendered.
+
+    Column widths are fitted to the printable frame and cell text is
+    wrapped inside them. A bare `Table(data)` sizes its columns to
+    their widest cell instead, with no upper bound, so a wide sheet
+    (measured: 25 columns) ran off both edges of the page - the text
+    was in the PDF but a reader could not see it, and LibreOffice
+    paginates the same sheet properly. Long single cell values did the
+    same thing on their own.
+    """
     workbook = openpyxl.load_workbook(source_path, data_only=True)
     styles = getSampleStyleSheet()
+    cell_style = ParagraphStyle(
+        "SheetCell",
+        parent=styles["BodyText"],
+        fontSize=_SHEET_CELL_FONT_SIZE,
+        leading=_SHEET_CELL_FONT_SIZE + 2,
+        spaceAfter=0,
+        # A long unbroken value (an id, a URL, a hash) has no space to
+        # wrap at, so without this it would overflow its column and
+        # reintroduce exactly the bug this function is fixing.
+        splitLongWords=True,
+    )
+    available_width = letter[0] - _SHEET_MARGIN * 2
     story: list[Any] = []
     for sheet in workbook.worksheets:
         story.append(Paragraph(_xml_escape(sheet.title), styles["Heading2"]))
-        data = [["" if cell is None else str(cell) for cell in row] for row in sheet.iter_rows(values_only=True)]
+        data = [
+            ["" if cell is None else str(cell) for cell in row]
+            for row in sheet.iter_rows(values_only=True)
+        ]
         if data:
-            story.append(Table(data))
+            column_count = max(len(row) for row in data)
+            # Splitting a wide sheet into column groups, rather than
+            # squeezing every column onto one page: at 25 columns a
+            # single-page fit leaves ~21pt per column, too narrow for
+            # even a 5-character heading, so splitLongWords chopped
+            # values mid-word ("COL00" -> "C/OL/00"). LibreOffice
+            # paginates the same sheet across pages instead, and this
+            # keeps values intact for the same reason. A normal sheet
+            # is one group, i.e. unchanged.
+            per_page = max(1, int(available_width // _SHEET_MIN_COLUMN_WIDTH))
+            for start in range(0, column_count, per_page):
+                columns = min(per_page, column_count - start)
+                chunk = [
+                    [
+                        Paragraph(_xml_escape(value), cell_style)
+                        for value in row[start : start + columns]
+                    ]
+                    for row in data
+                ]
+                story.append(
+                    Table(chunk, colWidths=[available_width / columns] * columns)
+                )
+                story.append(Spacer(1, 12))
         story.append(Spacer(1, 12))
     if not story:
         story.append(Paragraph("", styles["Normal"]))
-    SimpleDocTemplate(str(out_path), pagesize=letter).build(story)
+    SimpleDocTemplate(
+        str(out_path),
+        pagesize=letter,
+        leftMargin=_SHEET_MARGIN,
+        rightMargin=_SHEET_MARGIN,
+    ).build(story)
 
 
 def _reject_remote_uri(uri: str, _relative: str) -> str:
