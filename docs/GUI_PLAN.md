@@ -4,7 +4,8 @@ Extends `docs/SPEC.md` section 4's roadmap with a sixth phase. SPEC.md
 stays the source of truth for the locked requirements and the frozen
 interfaces; this document is the design record for Phase 6 only.
 
-Status: **planned, not started.** Nothing here has been implemented.
+Status: **6a and 6b done**; 6c onward not started. Slice status is in
+the §4 table.
 
 ---
 
@@ -209,10 +210,13 @@ edit. Additive, non-abstract, no `schema_version` bump, per SPEC.md
 ### 3.5 Rendering and responsiveness
 
 Today `_refresh()` re-renders **every page from disk, synchronously**,
-after every operation, undo, redo and zoom step. Measured at 0.188s
-for 15 pages, which extrapolates to ~6s for a 500-page document after
-every single click. With per-edit commits (decision #6) that becomes
-unusable during markup.
+after every operation, undo, redo and zoom step. Measured directly on
+a real 500-page document rather than extrapolated: **1065 ms** at the
+default zoom and **2292 ms** at the 720 px ceiling, blocking the UI
+thread, on every single click. (An earlier draft of this plan
+extrapolated ~6 s from a 15-page sample; the real figure is lower, and
+measuring beat scaling.) With per-edit commits (decision #6) that
+becomes the cost of every mark.
 
 Three changes together:
 
@@ -233,6 +237,39 @@ model already works*: an operation writes to a **new** working path
 and the session only swaps to it on success. Cancelling therefore
 means "discard the in-progress result and securely wipe the partial
 file" — never a half-written document replacing a good one.
+
+### 3.5.1 What 6b actually delivered (measured)
+
+Built and measured on a real 500-page document:
+
+| | UI blocked, pre-6b | UI blocked, 6b | After editing one page |
+| --- | --- | --- | --- |
+| default zoom 120x160 | 1065 ms | **10 ms** | 1 of 500 re-rendered, 2 ms |
+| max zoom 720x960 | 2292 ms | **10 ms** | 428 of 500, 2005 ms (background) |
+
+Two separate wins, worth not conflating:
+
+- **Async delivery is a universal win.** The UI never blocks for more
+  than ~10 ms regardless of document length or zoom, because
+  `render()` returns as soon as the items exist. It buys
+  *responsiveness, not throughput* — total rasterisation time is
+  unchanged (measured 18 ms sync vs 19 ms async for the same 40
+  pages), the event loop simply stops waiting on it.
+- **The cache win is complete only while the document fits its
+  budget.** At 120x160 a page costs 75 KB, so all 500 fit in the
+  192 MB budget and an edit re-renders exactly the page it touched. At
+  720x960 a page costs 2.7 MB, only 72 fit, and LRU eviction means an
+  edit re-renders ~428 pages again — off the UI thread, but still real
+  work.
+
+**Known limitation, deliberately not fixed here.** Thumbnails are
+rendered eagerly for every page. The right fix is to request only the
+pages actually on screen plus a lookahead, which §3.2 already
+specifies for the 6c viewer; doing it for thumbnails now would need
+its own handling for a widget that has never been shown (a headless
+test has no viewport, so "visible" is empty). Raising the cache budget
+instead would only move the cliff, since page cost grows with the
+square of the zoom.
 
 ### 3.6 Design system
 
@@ -320,8 +357,8 @@ pytest — before the next begins.
 
 | Slice | Contents |
 |---|---|
-| **6a** | Decompose `main_window.py` (§3.1). Pure move; behaviour and tests unchanged. |
-| **6b** | Rendering layer: async, cached, targeted invalidation (§3.5). Still thumbnails-only — the win is measurable before any new UI exists. |
+| **6a** | ✅ **Done.** Decomposed `main_window.py` 1174 → 541 lines (§3.1). Pure move: same 478 tests passing, zero test changes. |
+| **6b** | ✅ **Done.** Rendering layer: async, cached, targeted invalidation (§3.5). UI blocking on a 500-page document went 1065 ms → 10 ms; an edit at the default zoom now re-renders 1 page instead of 500. |
 | **6c** | Page viewer + sidebar layout (§3.2), read-only: scroll, zoom, fit modes, text selection, find, outline, links. |
 | **6d** | Background execution with progress and cancel (§3.5). |
 | **6e** | Markup and insert operations (§3.3) with their canvas tools (§3.4), including the re-editable annotation layer (§3.7); selection-aware dialogs; existing rect tools moved on-canvas. |

@@ -84,7 +84,14 @@ def _thumbnail_center_pixel(
     """The real rendered center-pixel color of thumbnail `index`,
     sampled from the actual built QIcon/QPixmap - not just "an item
     exists." A black/empty tab could still technically have a
-    QListWidgetItem with a blank or stale icon; this catches that."""
+    QListWidgetItem with a blank or stale icon; this catches that.
+
+    Waits for the tab's renderer first: since Phase 6b pages are
+    rasterised asynchronously (gui/rendering.py), so an item carries a
+    correctly-sized blank placeholder until its real image arrives.
+    Sampling without waiting would read the placeholder's white and
+    report it as a rendering failure."""
+    assert tab.renderer.wait_until_idle(), "thumbnail rendering did not finish"
     item = tab.thumbnail_list.item(index)
     assert item is not None, "expected a rendered thumbnail, found none"
     pixmap = item.icon().pixmap(window.thumbnail_size)
@@ -2130,3 +2137,113 @@ def test_a_clean_shutdown_leaves_nothing_to_recover(qapp: QApplication, tmp_path
         assert not next_launch.restore_autosaved_session()
     mock_question.assert_not_called()
     next_launch.close()
+
+
+def test_rotating_one_page_re_renders_only_that_page(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Phase 6b's actual payoff, end to end through the real window.
+
+    Before 6b, every applied operation re-rasterised the whole
+    document. Now RotatePagesOperation.affected_pages() reports the
+    single page it touched, so only that page is requested again -
+    measured here as the renderer's pending set, not inferred from a
+    timing measurement that a slow CI box could make flaky."""
+    src = _make_pdf(tmp_path / "src.pdf", 6)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    assert tab.renderer.wait_until_idle()
+    assert tab.renderer.cache_size == 6
+
+    window._apply_thumbnail_rotate(tab, [3], angle=90)
+
+    # Exactly one page needed re-rendering; the other five came from
+    # cache even though the operation wrote an entirely new working file.
+    assert tab.renderer._pending == {3}
+    assert tab.renderer.wait_until_idle()
+    assert tab.thumbnail_list.count() == 6
+    _force_close(window)
+
+
+def test_deleting_a_page_invalidates_the_whole_document(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Deleting page 1 shifts every later page's identity, so the
+    cached thumbnail for what used to be page 2 is now wrong. The
+    conservative answer is the correct one here."""
+    src = _make_pdf(tmp_path / "src.pdf", 4)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    assert tab.renderer.wait_until_idle()
+
+    window._apply_thumbnail_delete(tab, [1])
+
+    assert tab.renderer._pending == {1, 2, 3}
+    assert tab.renderer.wait_until_idle()
+    assert tab.thumbnail_list.count() == 3
+    _force_close(window)
+
+
+def test_each_tab_caches_its_own_pages(qapp: QApplication, tmp_path: Path) -> None:
+    """One renderer per tab, so one document's cache can never serve
+    another document's pages."""
+    a = _make_colored_pdf(tmp_path / "a.pdf", 2, (1, 0, 0))
+    b = _make_colored_pdf(tmp_path / "b.pdf", 3, (0, 1, 0))
+    window = MainWindow()
+    tab_a = _open_tab(window, a)
+    assert tab_a.renderer.wait_until_idle()
+    tab_b = _open_tab(window, b)
+    assert tab_b.renderer.wait_until_idle()
+
+    assert tab_a.renderer is not tab_b.renderer
+    assert tab_a.renderer.cache_size == 2
+    assert tab_b.renderer.cache_size == 3
+    assert _thumbnail_center_pixel(tab_a, window)[:3] == (255, 0, 0)
+    assert _thumbnail_center_pixel(tab_b, window)[:3] == (0, 255, 0)
+    _force_close(window)
+
+
+def test_closing_a_tab_releases_its_document_before_the_wipe(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """The renderer keeps the working file open; on Windows that would
+    defeat core/security/secure_delete.py, which is why _discard_tab
+    releases it first. Asserting the release itself, not that deletion
+    succeeded - deletion succeeds on Linux whether or not the handle
+    was held, which is exactly how the same bug reached CI from
+    gui/placement_canvas.py."""
+    src = _make_pdf(tmp_path / "src.pdf", 3)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    assert tab.renderer.wait_until_idle()
+    assert tab.renderer._pdf is not None
+
+    window._close_tab(window.tab_widget.indexOf(tab))
+
+    assert tab.renderer._pdf is None
+    _force_close(window)
+
+
+def test_replacing_a_tabs_document_does_not_show_the_old_pages(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Regression (Phase 6b): the thumbnail cache is keyed by (page,
+    size) rather than by the working file's path - it must be, because
+    every operation writes a new working file - so replacing a tab's
+    document with a *different* one of the same page count would
+    otherwise serve the previous document's cached thumbnails.
+
+    Sampled by real pixel colour, because the failure mode is a
+    correctly-sized, correctly-counted grid showing the wrong pages -
+    which a count() assertion cannot see."""
+    red = _make_colored_pdf(tmp_path / "red.pdf", 3, (1, 0, 0))
+    green = _make_colored_pdf(tmp_path / "green.pdf", 3, (0, 1, 0))
+    window = MainWindow()
+    tab = _open_tab(window, red)
+    assert _thumbnail_center_pixel(tab, window)[:3] == (255, 0, 0)
+
+    window._open_document_path(green, PLACEMENT_REPLACE_CURRENT)
+
+    assert window.current_tab is tab, "expected the same tab, reused"
+    assert _thumbnail_center_pixel(tab, window)[:3] == (0, 255, 0)
+    _force_close(window)

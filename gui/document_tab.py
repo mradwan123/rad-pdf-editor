@@ -19,6 +19,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import QListWidget, QVBoxLayout, QWidget
 
 from gui.controller import AppController
+from gui.rendering import ThumbnailRenderer
 
 
 class DocumentTab(QWidget):
@@ -47,6 +48,12 @@ class DocumentTab(QWidget):
         self.thumbnail_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self.thumbnail_list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.thumbnail_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+        # One renderer per tab, so each document gets its own page
+        # cache and its own QPdfDocument. Parented to the tab (its
+        # *document* handle is what has to be released deterministically
+        # - see ThumbnailRenderer.release).
+        self.renderer = ThumbnailRenderer(self.thumbnail_list, self)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

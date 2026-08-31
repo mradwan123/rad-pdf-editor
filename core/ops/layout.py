@@ -94,6 +94,12 @@ class CropOperation(Operation):
             "pages": list(self.pages),
         }
 
+    def affected_pages(self) -> list[int] | None:
+        """Page count and order are unchanged by this operation, so only
+        the pages it targets need re-rendering. An empty `pages` means
+        "every page", which is exactly the base class's `None`."""
+        return list(self.pages) or None
+
     def describe(self) -> str:
         return "Cropped pages"
 
@@ -148,6 +154,12 @@ class ResizeOperation(Operation):
             "height": self.height,
             "pages": list(self.pages),
         }
+
+    def affected_pages(self) -> list[int] | None:
+        """Page count and order are unchanged by this operation, so only
+        the pages it targets need re-rendering. An empty `pages` means
+        "every page", which is exactly the base class's `None`."""
+        return list(self.pages) or None
 
     def describe(self) -> str:
         return f"Resized to {self.width}x{self.height}pt"
@@ -284,6 +296,12 @@ class GrayscaleOperation(Operation):
             "dpi": self.dpi,
         }
 
+    def affected_pages(self) -> list[int] | None:
+        """Page count and order are unchanged by this operation, so only
+        the pages it targets need re-rendering. An empty `pages` means
+        "every page", which is exactly the base class's `None`."""
+        return list(self.pages) or None
+
     def describe(self) -> str:
         return "Converted to grayscale"
 
@@ -345,6 +363,12 @@ class FlipOperation(Operation):
             "direction": self.direction,
             "pages": list(self.pages),
         }
+
+    def affected_pages(self) -> list[int] | None:
+        """Page count and order are unchanged by this operation, so only
+        the pages it targets need re-rendering. An empty `pages` means
+        "every page", which is exactly the base class's `None`."""
+        return list(self.pages) or None
 
     def describe(self) -> str:
         target = "all pages" if not self.pages else f"{len(self.pages)} page(s)"

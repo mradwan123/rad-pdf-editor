@@ -2085,3 +2085,101 @@ menus, 8 Tools submenus with the same counts, all 36 `tool_actions`
 matching `TOOL_DIALOGS`, the `Ctrl+=` zoom alternate still bound - and
 `grab()`ed to PNG and looked at (branded empty state, toolbar with
 Save As/Undo/Redo correctly disabled).
+
+### 6b — rendering: async, cached, page-targeted (done)
+
+`gui/rendering.py`'s `ThumbnailRenderer` replaces the synchronous
+`render_thumbnails()` free function (deleted - it had no callers left).
+One renderer per `DocumentTab`, so each document owns its own cache and
+its own `QPdfDocument`.
+
+**Measured on a real 500-page document, not extrapolated** (the plan's
+original "~6 s" came from scaling a 15-page sample; the real figures
+are lower, and measuring beat scaling):
+
+| | UI blocked, pre-6b | UI blocked, 6b | after editing 1 page |
+| --- | --- | --- | --- |
+| default zoom 120x160 | 1065 ms | **10 ms** | 1 of 500 re-rendered, 2 ms |
+| max zoom 720x960 | 2292 ms | **10 ms** | 428 of 500, 2005 ms (background) |
+
+**Two wins, deliberately not conflated.** Async delivery is universal -
+the UI never blocks more than ~10 ms at any length or zoom - but it
+buys *responsiveness, not throughput*: total rasterisation time is
+unchanged (measured 18 ms sync vs 19 ms async for the same 40 pages,
+with a fresh `QPdfDocument` per run so no run inherited another's warm
+MuPDF cache; an earlier unfair benchmark appeared to show async 16x
+faster and was wrong). The cache win is what removes the work, and it
+is complete only while the document fits the budget.
+
+**The cache is keyed by `(page, width, height)` and lives on the tab -
+deliberately *not* by working-file path.** `allocate_working_path`
+mints a fresh `mkstemp` name for every operation, so a path-keyed cache
+would miss 100% of the time after any edit. Invalidation is explicit
+instead, via the new `Operation.affected_pages()`.
+
+**`Operation.affected_pages()`** (`core/model/operation.py`) - the one
+additive change to a frozen interface, non-abstract and defaulting to
+`None` ("unknown, assume all"), so nothing written before it existed
+had to change. Overridden on the ten operations that preserve page
+**count and order** (Rotate, Crop, Resize, Grayscale, Flip, Flatten,
+RemoveAnnotations, HeaderFooter, BatesNumbering, Deskew) as
+`list(self.pages) or None` - the empty list already means "all pages"
+throughout this codebase. Deliberately *not* overridden on Delete /
+Extract / N-up / Merge / Reorder: those shift every later page's
+identity, so cached thumbnails for pages they never touched are wrong
+too. Undo/redo also invalidate everything, since the inverse of most
+operations is a snapshot restore.
+
+**A real limitation, measured rather than glossed:** at 720x960 a page
+costs 2.7 MB, so only 72 of 500 fit in the 192 MB budget and LRU
+eviction makes an edit re-render ~428 pages anyway - off the UI thread,
+but still real work. A bound is not optional (unbounded would be
+~1.4 GB), and raising it only moves the cliff since page cost grows
+with the square of the zoom. The real fix is requesting only the pages
+actually on screen plus a lookahead, which is already specified for the
+6c viewer; thumbnails render eagerly today. Not done here because a
+widget that has never been shown has no viewport, so "visible" is empty
+in a headless test - that needs its own handling, in its own slice.
+
+**Items appear synchronously with a correctly-sized blank placeholder**
+and each real page replaces its own as it arrives. That is what keeps
+`count()`, the `UserRole` page numbers and `QIcon.actualSize()` correct
+the instant `render()` returns - the properties the window and the
+existing tests rely on - so all 478 pre-existing tests passed unchanged
+with only one test-helper edit: `_thumbnail_center_pixel` now waits via
+`renderer.wait_until_idle()` before sampling, or it would read the
+placeholder's white and report a rendering failure.
+
+**Windows handle discipline carried over.** The renderer's
+`QPdfDocument` is unparented and held only by `self._pdf`, so clearing
+it destroys it under refcounting; `release()` does that and
+`_discard_tab` calls it **before** `close_session()`. Same trap
+`gui/placement_canvas.py` already hit: `QPdfDocument.close()` does not
+release the file descriptor, only destruction does, and Windows refuses
+to overwrite or unlink an open file - which would silently defeat the
+secure wipe. The regression test asserts the *release*, not that
+deletion succeeded, because deletion succeeds on Linux either way -
+exactly how that bug reached CI last time.
+
+Stale async results are dropped by comparing the delivered size against
+the current one, so a result from a superseded zoom or a rebuilt grid
+can never write into an item that no longer exists.
+
+**A real bug this introduced, found by re-reading the diff rather than
+by the suite** (no existing test replaced a tab's document with a
+*visually different* one): the cache is keyed by `(page, size)` and not
+by path, so **Replace Current Tab** served the previous document's
+thumbnails - a correctly-sized, correctly-counted grid showing the
+wrong pages, which no `count()` assertion can see. Reproduced first
+against real colour-sampled pages (red document replaced by a green one
+of the same page count still sampled `(255, 0, 0)`), then fixed by
+declaring the identity change explicitly in `_open_document_path` -
+the renderer cannot distinguish "next revision of this document" from
+"a different document" by path alone, and that is inherent to the
+cache key, not an oversight in it. Regression test:
+`test_replacing_a_tabs_document_does_not_show_the_old_pages`.
+
+Verified visually per convention: grabbed the real window mid-render
+(correctly-sized white placeholders in a proper grid - importantly not
+the "black empty tab" failure mode) and settled (all 12 pages rendered,
+correct order, "12 page(s)" in the status bar).

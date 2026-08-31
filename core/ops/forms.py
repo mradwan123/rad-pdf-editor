@@ -138,6 +138,12 @@ class FlattenOperation(Operation):
     def serialize(self) -> dict[str, Any]:
         return {"schema_version": self.schema_version, "type": "flatten", "pages": list(self.pages)}
 
+    def affected_pages(self) -> list[int] | None:
+        """Page count and order are unchanged by this operation, so only
+        the pages it targets need re-rendering. An empty `pages` means
+        "every page", which is exactly the base class's `None`."""
+        return list(self.pages) or None
+
     def describe(self) -> str:
         return "Flattened annotations"
 
@@ -189,6 +195,12 @@ class RemoveAnnotationsOperation(Operation):
             "pages": list(self.pages),
             "subtypes": list(self.subtypes),
         }
+
+    def affected_pages(self) -> list[int] | None:
+        """Page count and order are unchanged by this operation, so only
+        the pages it targets need re-rendering. An empty `pages` means
+        "every page", which is exactly the base class's `None`."""
+        return list(self.pages) or None
 
     def describe(self) -> str:
         return "Removed annotations"

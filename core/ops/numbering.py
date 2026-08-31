@@ -101,6 +101,12 @@ class HeaderFooterOperation(Operation):
             "pages": list(self.pages),
         }
 
+    def affected_pages(self) -> list[int] | None:
+        """Page count and order are unchanged by this operation, so only
+        the pages it targets need re-rendering. An empty `pages` means
+        "every page", which is exactly the base class's `None`."""
+        return list(self.pages) or None
+
     def describe(self) -> str:
         return "Added header/footer"
 
@@ -185,6 +191,12 @@ class BatesNumberingOperation(Operation):
             "font_size": self.font_size,
             "pages": list(self.pages),
         }
+
+    def affected_pages(self) -> list[int] | None:
+        """Page count and order are unchanged by this operation, so only
+        the pages it targets need re-rendering. An empty `pages` means
+        "every page", which is exactly the base class's `None`."""
+        return list(self.pages) or None
 
     def describe(self) -> str:
         return "Added page numbers"

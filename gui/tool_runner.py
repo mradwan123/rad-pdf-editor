@@ -113,6 +113,7 @@ class ToolRunnerMixin(WindowPart):
                 operation = plugin.build_operation(**dialog.values())
                 with self._busy_cursor():
                     tab.controller.apply_operation(operation)
+                tab.renderer.invalidate(operation.affected_pages())
             except PDFEditorError as exc:
                 if created_tab:
                     # Don't strand an empty tab for a Merge that built
@@ -187,6 +188,7 @@ class ToolRunnerMixin(WindowPart):
             operation = self.registry.get(tool_id).build_operation(**kwargs)
             with self._busy_cursor():
                 tab.controller.apply_operation(operation)
+            tab.renderer.invalidate(operation.affected_pages())
         except PDFEditorError as exc:
             self._show_error(exc)
         # Refresh either way: on success this rebuilds thumbnails from

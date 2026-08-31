@@ -62,7 +62,6 @@ from gui.dialogs.tab_placement_dialog import (
     TabPlacementDialog,
 )
 from gui.document_tab import DocumentTab
-from gui.rendering import render_thumbnails
 from gui.resources import build_logo_pixmap
 from gui.tab_manager import TabManagementMixin
 from gui.tool_runner import ToolRunnerMixin
@@ -307,6 +306,19 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
 
         try:
             tab.controller.open_document(path)
+            # A *different document* is now in this tab. The cache is
+            # keyed by (page, size) and not by the working file's path -
+            # it has to be, since allocate_working_path mints a new name
+            # for every operation and a path-keyed cache would never hit
+            # after an edit. The cost of that choice is that the
+            # renderer cannot tell "next revision of the same document"
+            # from "an entirely different document", so the identity
+            # change has to be declared here. Without this, Replace
+            # Current Tab showed the previous document's thumbnails
+            # (confirmed against real colour-sampled pages, and covered
+            # by test_replacing_a_tabs_document_does_not_show_the_old_pages).
+            # A no-op for a brand-new tab, whose cache is already empty.
+            tab.renderer.invalidate(None)
         except PDFEditorError as exc:
             # A recent-file entry that fails to open (moved/deleted since
             # last time) is stale - drop it so it doesn't keep
@@ -476,6 +488,12 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
         except PDFEditorError as exc:
             self._show_error(exc)
             return
+        # Conservative by design: undo/redo restores a whole prior
+        # document state, and the inverse of most operations is a
+        # snapshot restore, which reports no affected pages.
+        tab = self.current_tab
+        if tab is not None:
+            tab.renderer.invalidate(None)
         self._refresh()
 
     def _redo(self) -> None:
@@ -488,6 +506,12 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
         except PDFEditorError as exc:
             self._show_error(exc)
             return
+        # Conservative by design: undo/redo restores a whole prior
+        # document state, and the inverse of most operations is a
+        # snapshot restore, which reports no affected pages.
+        tab = self.current_tab
+        if tab is not None:
+            tab.renderer.invalidate(None)
         self._refresh()
 
     # --- rendering ------------------------------------------------------------
@@ -509,13 +533,13 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
         self._update_action_state()
 
     def _render_tab(self, tab: DocumentTab) -> None:
-        tab.thumbnail_list.clear()
         working_path = tab.controller.doc.working_path
         if tab.controller.is_open and working_path is not None:
-            self._render_thumbnails(tab.thumbnail_list, working_path)
-
-    def _render_thumbnails(self, thumbnail_list: QListWidget, path: Path) -> None:
-        render_thumbnails(thumbnail_list, path, self.thumbnail_size)
+            # Returns as soon as the items exist; cached pages already
+            # carry their image and the rest stream in (gui/rendering.py).
+            tab.renderer.render(working_path, self.thumbnail_size)
+        else:
+            tab.thumbnail_list.clear()
 
     def _update_action_state(self) -> None:
         controller = self.controller

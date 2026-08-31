@@ -104,6 +104,11 @@ class TabManagementMixin(WindowPart):
         index = self.tab_widget.indexOf(tab)
         if index != -1:
             self.tab_widget.removeTab(index)
+        # Before close_session(): the renderer holds an open
+        # QPdfDocument on the working file, and Windows refuses to
+        # overwrite or unlink an open file, which would defeat the
+        # secure wipe (the same trap gui/placement_canvas.py hit).
+        tab.renderer.release()
         tab.controller.close_session()
         tab.deleteLater()
         self._mark_active_session()

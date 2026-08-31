@@ -121,6 +121,12 @@ class RotatePagesOperation(Operation):
             "pages": list(self.pages),
         }
 
+    def affected_pages(self) -> list[int] | None:
+        """Page count and order are unchanged by this operation, so only
+        the pages it targets need re-rendering. An empty `pages` means
+        "every page", which is exactly the base class's `None`."""
+        return list(self.pages) or None
+
     def describe(self) -> str:
         target = "all pages" if not self.pages else f"{len(self.pages)} page(s)"
         return f"Rotated {target} by {self.angle} degrees"

@@ -68,3 +68,22 @@ class Operation(ABC):
         full file paths or document contents if avoidable, given the
         confidential-document requirement (SPEC.md section 1).
         """
+
+    def affected_pages(self) -> list[int] | None:
+        """1-based page numbers whose *rendered appearance* this
+        operation changes, or `None` for "unknown — assume all pages".
+
+        Purely a rendering hint: the GUI uses it to re-rasterise only
+        the pages an edit actually touched instead of the whole
+        document (see docs/GUI_PLAN.md §3.5). Nothing about correctness
+        depends on it, and `None` is always a safe answer — which is
+        why this is concrete rather than abstract, so the operations
+        written before it existed keep working untouched.
+
+        Only override this when the operation preserves **page count
+        and page order**. An operation that adds, removes or reorders
+        pages shifts every later page's identity, so its old cached
+        thumbnails are wrong even for pages it never edited: those must
+        keep returning `None`.
+        """
+        return None

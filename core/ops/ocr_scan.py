@@ -219,6 +219,12 @@ class DeskewOperation(Operation):
             "dpi": self.dpi,
         }
 
+    def affected_pages(self) -> list[int] | None:
+        """Page count and order are unchanged by this operation, so only
+        the pages it targets need re-rendering. An empty `pages` means
+        "every page", which is exactly the base class's `None`."""
+        return list(self.pages) or None
+
     def describe(self) -> str:
         return f"Deskewed {self._corrected_count} of {self._target_count} page(s)"
 
