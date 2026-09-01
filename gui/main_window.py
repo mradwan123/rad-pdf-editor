@@ -59,6 +59,7 @@ from core.session.workflow_store import WorkflowStore
 from gui.controller import AppController
 from gui.dialogs.base_tool_dialog import BaseToolDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
+from gui.dialogs.merge_dialog import MergeDialog
 from gui.dialogs.properties_dialog import PropertiesDialog
 from gui.dialogs.run_workflow_dialog import RunWorkflowDialog
 from gui.dialogs.sign_dialog import SignDialog
@@ -1104,6 +1105,14 @@ class MainWindow(QMainWindow):
             working_path = tab.controller.doc.working_path
             assert working_path is not None
             dialog = SignDialog(self, working_path)
+        elif tool_id == "merge" and tab is not None and tab.controller.is_open:
+            # Merge is meaningful with nothing open (builds a document
+            # from scratch - the created_tab branch below handles
+            # that), but when a document IS already open, pre-add its
+            # working file as a source so running Merge again adds to
+            # it instead of silently discarding it - see MergeDialog's
+            # docstring for why.
+            dialog = MergeDialog(self, tab.controller.doc.working_path)
         else:
             dialog = dialog_cls(self)
 

@@ -20,11 +20,21 @@ class MergeDialog(BaseToolDialog):
     reorderable list of source files - so it adds a custom widget
     block via `add_full_width` rather than fitting the plain form."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, current_document: Path | None = None) -> None:
+        """`current_document`, when given, is the already-open tab's
+        working file - pre-added as the first source so running Merge
+        again *adds to* what's already open instead of silently
+        replacing it. MergeOperation itself still just concatenates
+        `sources` verbatim (see core/ops/merge_split.py) - nothing
+        about the operation's "combine exactly these files" semantics
+        changes; this only fixes the dialog defaulting to an empty
+        list that discarded the current document with no warning."""
         super().__init__(self.tr("Merge"), parent)
 
         self.file_list = QListWidget()
         self.file_list.setAccessibleName(self.tr("Files to merge"))
+        if current_document is not None:
+            self.file_list.addItem(str(current_document))
 
         add_button = QPushButton(self.tr("Add Files..."))
         add_button.clicked.connect(self._add_files)

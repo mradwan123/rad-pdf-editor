@@ -2579,3 +2579,57 @@ Full suite: **580 passed** - 562 on this fix's own branch (560 + 2
 new), then 580 once merged with the conversion-audit work above, which
 had landed on `main` meanwhile. `ruff check .` clean,
 `mypy core cli gui` clean.
+
+## Merge silently discarded the currently-open document on a second run (fixed)
+
+User report: "when I added one file [via Merge], it was ok, then I
+tried again, and it didn't work" - reproduced exactly. Merging a
+second time (Tools > Merge again, on a tab that already held a
+previously-merged document) didn't error, but the first file's content
+was simply gone.
+
+**Not a `MergeOperation` bug.** `core/ops/merge_split.py`'s
+`MergeOperation.apply()` replacing the working document with exactly
+`sources` (never touching whatever's currently open) is deliberate,
+documented behavior - `tests/unit/test_merge_split.py`'s
+`test_merge_undo_restores_prior_state` says so explicitly and pins it.
+Changing that would have broken a real, intentional invariant, not
+fixed a bug.
+
+**The actual gap: `MergeDialog` always started with an empty file
+list**, even when a document was already open. So a first Merge (from
+an empty window) worked as expected, but a second Merge on the
+resulting tab handed `MergeOperation` only the newly-picked file(s) -
+correctly per its own contract, but with nothing telling the dialog
+"the current document should be one of the sources too." The result
+looked exactly like "adding a file didn't work": the file you just
+added replaced everything instead of joining it.
+
+**Fix, GUI-only**: `MergeDialog.__init__` gained an optional
+`current_document: Path | None` parameter - when given, it's added as
+the first list item before the dialog is shown, same as any file added
+via "Add Files...". `MainWindow._run_tool` now special-cases
+`tool_id == "merge"` the same way it already special-cases
+`fill_form`/`sign` (both of which pass the open tab's working path
+into their dialog): when a tab is open, `MergeDialog(self,
+tab.controller.doc.working_path)` pre-seeds it; with nothing open, the
+existing `created_tab` branch (Merge building a document from scratch)
+is unchanged. Users can still remove the pre-added entry via the
+existing "Remove Selected" button if they genuinely want to replace
+rather than add to the open document - no new affordance needed, the
+list is fully editable either way.
+
+Verified the regression test actually catches the bug, not just
+passes: confirmed it fails against the pre-fix code first (dialog
+opens empty, `file_list.count() == 0` instead of 1), then confirmed it
+passes with the fix - the same before/after discipline this file's
+other regression-test entries already use.
+`test_merging_again_with_a_document_already_open_adds_to_it`
+(`tests/integration/test_gui_smoke.py`) covers: the first merge (1
+page), a no-op second merge that accepts the pre-populated list
+unchanged (must still show 1 page, not 0), and a real second merge
+that adds a file via "Add Files..." (must show 1+2=3 pages, not just
+2).
+
+Full suite: **581 passed** (580 + 1 new), `ruff check .` clean,
+`mypy core cli gui` clean.
