@@ -271,6 +271,40 @@ test has no viewport, so "visible" is empty). Raising the cache budget
 instead would only move the cliff, since page cost grows with the
 square of the zoom.
 
+### 3.2.1 Viewer notes from building it
+
+**Scene units are device pixels, not points scaled by a view
+transform.** Each page is rendered at exactly the pixel size it
+occupies and the view transform stays at identity, so zooming in
+produces a genuinely sharper page rather than a magnified blurry one.
+Fit modes compute a zoom factor from the viewport rather than calling
+`fitInView`.
+
+**Viewport-limited rendering lands here, not in 6b.** Only pages
+intersecting the viewport (plus a two-page lookahead) are requested.
+That is what §3.5.1 flagged as the fix for 6b's eviction cliff, and it
+matters far more here: a full-size page costs ~2 MB against a
+thumbnail's 75 KB. Placeholders are *painted*, never allocated - a real
+placeholder `QPixmap` per page would cost ~1 GB for 500 unrendered A4
+pages at 100%.
+
+**Zoom is now two separate controls.** The page view takes the standard
+shortcuts (Ctrl+= / Ctrl+- / Ctrl+0, plus Ctrl+1 fit width and Ctrl+2
+fit page) because it is the primary pane; thumbnail sizing keeps its
+behaviour under Ctrl+Shift as sidebar navigation. Three existing tests
+moved to the renamed thumbnail actions - the coverage is unchanged,
+only which action drives it.
+
+**`getSelection()` is unusable in this Qt build** (PySide6 6.11.1,
+verified): it returns an invalid, empty `QPdfSelection` for every point
+range tried, including ranges squarely over text that `getAllText()`
+reports. Text selection therefore cannot use the obvious API and will
+be built from `getAllText().bounds()` - which returns one polygon per
+line, in top-left-origin PDF points - plus `getSelectionAtIndex()`,
+which does work correctly. Per-character rects cost ~906 us each
+(2.6 s for a dense page), so a point maps to a character by locating
+the line and binary-searching within it, never by walking the page.
+
 ### 3.6 Design system
 
 - **Icons.** The app currently has none — the toolbar is four text
@@ -359,7 +393,7 @@ pytest — before the next begins.
 |---|---|
 | **6a** | ✅ **Done.** Decomposed `main_window.py` 1174 → 541 lines (§3.1). Pure move: same 478 tests passing, zero test changes. |
 | **6b** | ✅ **Done.** Rendering layer: async, cached, targeted invalidation (§3.5). UI blocking on a 500-page document went 1065 ms → 10 ms; an edit at the default zoom now re-renders 1 page instead of 500. |
-| **6c** | Page viewer + sidebar layout (§3.2), read-only: scroll, zoom, fit modes, text selection, find, outline, links. |
+| **6c** | 🔨 **In progress.** Page viewer + sidebar layout (§3.2). Done: continuous scroll, zoom, fit width/page, viewport-limited rendering. Remaining: text selection, find, outline, links. |
 | **6d** | Background execution with progress and cancel (§3.5). |
 | **6e** | Markup and insert operations (§3.3) with their canvas tools (§3.4), including the re-editable annotation layer (§3.7); selection-aware dialogs; existing rect tools moved on-canvas. |
 | **6f** | Redaction: rect, document-wide search-and-redact, and the metadata/XMP/bookmark/attachment scrub with its review step (§3.7). Split from 6e because it is security-critical and deserves its own verification pass. |

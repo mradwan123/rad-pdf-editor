@@ -109,6 +109,7 @@ class TabManagementMixin(WindowPart):
         # overwrite or unlink an open file, which would defeat the
         # secure wipe (the same trap gui/placement_canvas.py hit).
         tab.renderer.release()
+        tab.canvas.release()
         tab.controller.close_session()
         tab.deleteLater()
         self._mark_active_session()

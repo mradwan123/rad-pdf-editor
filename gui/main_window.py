@@ -109,6 +109,12 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
     zoom_in_action: QAction
     zoom_out_action: QAction
     reset_zoom_action: QAction
+    fit_width_action: QAction
+    fit_page_action: QAction
+    larger_thumbnails_action: QAction
+    smaller_thumbnails_action: QAction
+    reset_thumbnails_action: QAction
+    toggle_sidebar_action: QAction
     toggle_toolbar_action: QAction
     toggle_statusbar_action: QAction
     full_screen_action: QAction
@@ -245,6 +251,37 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
     def _reset_zoom(self) -> None:
         self._set_thumbnail_zoom(_THUMBNAIL_SIZE.width())
 
+    # --- view menu: page zoom (the primary view) --------------------------
+
+    def _page_zoom_in(self) -> None:
+        tab = self.current_tab
+        if tab is not None:
+            tab.canvas.zoom_in()
+
+    def _page_zoom_out(self) -> None:
+        tab = self.current_tab
+        if tab is not None:
+            tab.canvas.zoom_out()
+
+    def _page_reset_zoom(self) -> None:
+        tab = self.current_tab
+        if tab is not None:
+            tab.canvas.reset_zoom()
+
+    def _fit_width(self) -> None:
+        tab = self.current_tab
+        if tab is not None:
+            tab.canvas.fit_width()
+
+    def _fit_page(self) -> None:
+        tab = self.current_tab
+        if tab is not None:
+            tab.canvas.fit_page()
+
+    def _toggle_sidebar(self, checked: bool) -> None:
+        for tab in self.tabs():
+            tab.thumbnail_list.setVisible(checked)
+
     def _toggle_toolbar(self, checked: bool) -> None:
         self.toolbar.setVisible(checked)
 
@@ -319,6 +356,7 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
             # by test_replacing_a_tabs_document_does_not_show_the_old_pages).
             # A no-op for a brand-new tab, whose cache is already empty.
             tab.renderer.invalidate(None)
+            tab.canvas.invalidate(None)
         except PDFEditorError as exc:
             # A recent-file entry that fails to open (moved/deleted since
             # last time) is stale - drop it so it doesn't keep
@@ -494,6 +532,7 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
         tab = self.current_tab
         if tab is not None:
             tab.renderer.invalidate(None)
+            tab.canvas.invalidate(None)
         self._refresh()
 
     def _redo(self) -> None:
@@ -512,6 +551,7 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
         tab = self.current_tab
         if tab is not None:
             tab.renderer.invalidate(None)
+            tab.canvas.invalidate(None)
         self._refresh()
 
     # --- rendering ------------------------------------------------------------
@@ -535,11 +575,13 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
     def _render_tab(self, tab: DocumentTab) -> None:
         working_path = tab.controller.doc.working_path
         if tab.controller.is_open and working_path is not None:
-            # Returns as soon as the items exist; cached pages already
-            # carry their image and the rest stream in (gui/rendering.py).
+            # Both return as soon as their geometry exists; pixels stream
+            # in (gui/rendering.py, gui/page_canvas.py).
             tab.renderer.render(working_path, self.thumbnail_size)
+            tab.canvas.set_document(working_path)
         else:
             tab.thumbnail_list.clear()
+            tab.canvas.clear()
 
     def _update_action_state(self) -> None:
         controller = self.controller

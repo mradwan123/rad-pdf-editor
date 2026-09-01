@@ -1202,6 +1202,9 @@ def test_run_workflow_applies_saved_pipeline_without_touching_open_document(
 def test_view_menu_zoom_in_out_and_reset_resize_the_icon_and_rerender(
     qapp: QApplication, tmp_path: Path
 ) -> None:
+    """Thumbnail sizing. Phase 6c moved this off the primary zoom
+    shortcuts - those now zoom the page view - but the behaviour it
+    covers is unchanged."""
     from gui.main_window import _THUMBNAIL_SIZE
 
     src = _make_pdf(tmp_path / "src.pdf", 1)
@@ -1211,7 +1214,7 @@ def test_view_menu_zoom_in_out_and_reset_resize_the_icon_and_rerender(
     assert window.thumbnail_size == _THUMBNAIL_SIZE
     assert window.thumbnail_list.iconSize() == _THUMBNAIL_SIZE
 
-    window.zoom_in_action.trigger()
+    window.larger_thumbnails_action.trigger()
 
     assert window.thumbnail_size.width() > _THUMBNAIL_SIZE.width()
     assert window.thumbnail_list.iconSize() == window.thumbnail_size
@@ -1220,15 +1223,15 @@ def test_view_menu_zoom_in_out_and_reset_resize_the_icon_and_rerender(
     item = window.thumbnail_list.item(0)
     assert item.icon().actualSize(window.thumbnail_size) == window.thumbnail_size
 
-    window.zoom_out_action.trigger()
-    window.zoom_out_action.trigger()
+    window.smaller_thumbnails_action.trigger()
+    window.smaller_thumbnails_action.trigger()
 
     assert window.thumbnail_size.width() < _THUMBNAIL_SIZE.width()
     assert window.thumbnail_list.iconSize() == window.thumbnail_size
     item = window.thumbnail_list.item(0)
     assert item.icon().actualSize(window.thumbnail_size) == window.thumbnail_size
 
-    window.reset_zoom_action.trigger()
+    window.reset_thumbnails_action.trigger()
 
     assert window.thumbnail_size == _THUMBNAIL_SIZE
     assert window.thumbnail_list.iconSize() == _THUMBNAIL_SIZE
@@ -1242,11 +1245,11 @@ def test_view_menu_zoom_is_clamped_to_min_and_max(qapp: QApplication) -> None:
     window = MainWindow()
 
     for _ in range(50):
-        window.zoom_in_action.trigger()
+        window.larger_thumbnails_action.trigger()
     assert window.thumbnail_size.width() == _THUMBNAIL_ZOOM_MAX_WIDTH
 
     for _ in range(50):
-        window.zoom_out_action.trigger()
+        window.smaller_thumbnails_action.trigger()
     assert window.thumbnail_size.width() == _THUMBNAIL_ZOOM_MIN_WIDTH
 
     window.close()
@@ -1266,12 +1269,10 @@ def test_view_menu_zoom_in_keyboard_shortcut_actually_fires(
     literal Ctrl++ (still bound, must keep working) and the added
     unshifted Ctrl+= alternate.
     """
-    from gui.main_window import _THUMBNAIL_ZOOM_STEP
-
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
     window.show()
-    _open_tab(window, src)
+    tab = _open_tab(window, src)
     # QTest key events are only routed to shortcuts when the window is
     # the active one - confirmed by hand while investigating this bug
     # (a shown-but-not-activated offscreen window silently drops every
@@ -1279,13 +1280,14 @@ def test_view_menu_zoom_in_keyboard_shortcut_actually_fires(
     window.activateWindow()
     QApplication.processEvents()
 
-    start_width = window.thumbnail_size.width()
+    start_zoom = tab.canvas.zoom
 
     QTest.keyClick(window, Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier)
-    assert window.thumbnail_size.width() == start_width + _THUMBNAIL_ZOOM_STEP
+    after_equal = tab.canvas.zoom
+    assert after_equal > start_zoom, "unshifted Ctrl+= must zoom the page view"
 
     QTest.keyClick(window, Qt.Key.Key_Plus, Qt.KeyboardModifier.ControlModifier)
-    assert window.thumbnail_size.width() == start_width + 2 * _THUMBNAIL_ZOOM_STEP
+    assert tab.canvas.zoom > after_equal, "literal Ctrl++ must keep working too"
 
     _force_close(window)
 
@@ -2246,4 +2248,96 @@ def test_replacing_a_tabs_document_does_not_show_the_old_pages(
 
     assert window.current_tab is tab, "expected the same tab, reused"
     assert _thumbnail_center_pixel(tab, window)[:3] == (0, 255, 0)
+    _force_close(window)
+
+
+def test_the_page_viewer_shows_the_open_document(qapp: QApplication, tmp_path: Path) -> None:
+    """Phase 6c: a tab is no longer a thumbnail grid alone - the page
+    view is the primary pane and shows the same document."""
+    src = _make_pdf(tmp_path / "src.pdf", 5)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+
+    assert tab.canvas.page_count == 5
+    assert tab.thumbnail_list.count() == 5
+    assert tab.canvas.wait_until_idle()
+    assert tab.canvas.rendered_page_count > 0
+    _force_close(window)
+
+
+def test_clicking_a_thumbnail_scrolls_the_page_view(qapp: QApplication, tmp_path: Path) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 12)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    assert tab.canvas.current_page == 1
+
+    tab.thumbnail_list.itemClicked.emit(tab.thumbnail_list.item(8))
+
+    assert tab.canvas.current_page == 9
+
+
+def test_an_edit_re_renders_the_page_view_too(qapp: QApplication, tmp_path: Path) -> None:
+    """The viewer must not keep showing a stale image of a page an
+    operation just changed."""
+    src = _make_pdf(tmp_path / "src.pdf", 4)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    assert tab.canvas.wait_until_idle()
+
+    window._apply_thumbnail_rotate(tab, [1], angle=90)
+    assert tab.canvas.wait_until_idle()
+
+    # Rotating swaps the page's aspect ratio, so the viewer's own
+    # geometry has to have been rebuilt from the new document.
+    assert tab.canvas._items[0].boundingRect().width() > tab.canvas._items[0].boundingRect().height()
+    _force_close(window)
+
+
+def test_closing_a_tab_releases_the_page_views_document(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Like the thumbnail renderer, the canvas holds the working file
+    open - both must be released before the session dir is wiped."""
+    src = _make_pdf(tmp_path / "src.pdf", 3)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    assert tab.canvas._pdf is not None
+
+    window._close_tab(window.tab_widget.indexOf(tab))
+
+    assert tab.canvas._pdf is None
+    assert tab.renderer._pdf is None
+    _force_close(window)
+
+
+def test_view_menu_fit_modes_act_on_the_page_view(qapp: QApplication, tmp_path: Path) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 3)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+
+    window.fit_page_action.trigger()
+    fit_page_zoom = tab.canvas.zoom
+    window.fit_width_action.trigger()
+    fit_width_zoom = tab.canvas.zoom
+
+    # A portrait page fits by width at a larger zoom than it fits whole.
+    assert fit_width_zoom > fit_page_zoom
+    _force_close(window)
+
+
+def test_page_zoom_actions_do_not_resize_thumbnails(qapp: QApplication, tmp_path: Path) -> None:
+    """The two zooms are separate controls now: Ctrl+= zooms the page,
+    Ctrl+Shift+= resizes the sidebar thumbnails."""
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    thumbnail_size = QSize(window.thumbnail_size)
+    page_zoom = tab.canvas.zoom
+
+    window.zoom_in_action.trigger()
+    assert tab.canvas.zoom > page_zoom
+    assert window.thumbnail_size == thumbnail_size, "page zoom must not touch thumbnails"
+
+    window.larger_thumbnails_action.trigger()
+    assert window.thumbnail_size.width() > thumbnail_size.width()
     _force_close(window)

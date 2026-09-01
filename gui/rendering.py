@@ -80,6 +80,85 @@ _CACHE_BUDGET_BYTES = 192 * 1024 * 1024
 _CacheKey = tuple[int, int, int]  # (page number, width, height)
 
 
+class PixmapCache:
+    """Byte-budgeted LRU cache of rendered pages, keyed by
+    `(page, width, height)`.
+
+    Shared by the thumbnail grid and the page viewer. Deliberately not
+    keyed by the working file's path: `allocate_working_path` mints a
+    fresh `mkstemp` name for every operation, so a path-keyed cache
+    would miss 100% of the time after any edit. Invalidation is
+    explicit instead, driven by `Operation.affected_pages()`.
+    """
+
+    def __init__(self, budget_bytes: int = _CACHE_BUDGET_BYTES) -> None:
+        self._budget = budget_bytes
+        self._entries: OrderedDict[_CacheKey, QPixmap] = OrderedDict()
+        self._bytes = 0
+
+    def get(self, key: _CacheKey) -> QPixmap | None:
+        pixmap = self._entries.get(key)
+        if pixmap is not None:
+            self._entries.move_to_end(key)  # LRU: most recently used
+        return pixmap
+
+    def put(self, key: _CacheKey, pixmap: QPixmap) -> None:
+        if key in self._entries:
+            self.drop(key)
+        self._entries[key] = pixmap
+        self._bytes += _pixmap_bytes(pixmap)
+        while self._bytes > self._budget and len(self._entries) > 1:
+            self.drop(next(iter(self._entries)))  # oldest first
+
+    def drop(self, key: _CacheKey) -> None:
+        pixmap = self._entries.pop(key, None)
+        if pixmap is not None:
+            self._bytes -= _pixmap_bytes(pixmap)
+
+    def invalidate(self, pages: list[int] | None) -> None:
+        """Drop `pages` (1-based), or everything when None - which is
+        what `Operation.affected_pages()` reports for anything that
+        adds, removes or reorders pages, since that shifts every later
+        page's identity."""
+        if pages is None:
+            self._entries.clear()
+            self._bytes = 0
+            return
+        targets = set(pages)
+        for key in [k for k in self._entries if k[0] in targets]:
+            self.drop(key)
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+def _pixmap_bytes(pixmap: QPixmap) -> int:
+    return pixmap.width() * pixmap.height() * 4  # ARGB32
+
+
+def composite_on_white(rendered: QImage, size: QSize) -> QImage:
+    """QtPdf leaves any unpainted area of a page fully transparent
+    (alpha=0) rather than opaque white - most visible on blank or
+    near-empty pages. Composite onto a white backdrop so a page always
+    reads as a page, not as "nothing" wherever the source PDF painted
+    nothing."""
+    page_image = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    page_image.fill(Qt.GlobalColor.white)
+    painter = QPainter(page_image)
+    painter.drawImage(0, 0, rendered)
+    painter.end()
+    return page_image
+
+
+def blank_page(size: QSize) -> QPixmap:
+    """A blank page at exactly `size`, used until a real render arrives.
+    Sized precisely so an item's `QIcon.actualSize()` and a canvas
+    page's geometry are already correct before its pixels exist."""
+    pixmap = QPixmap(size)
+    pixmap.fill(Qt.GlobalColor.white)
+    return pixmap
+
+
 class ThumbnailRenderer(QObject):
     """Renders one document's pages into one `QListWidget`.
 
@@ -107,8 +186,7 @@ class ThumbnailRenderer(QObject):
         self._renderer: QPdfPageRenderer | None = None
         self._path: Path | None = None
 
-        self._cache: OrderedDict[_CacheKey, QPixmap] = OrderedDict()
-        self._cache_bytes = 0
+        self._cache = PixmapCache()
         #: page number -> the item currently showing it, for this pass only.
         self._items: dict[int, QListWidgetItem] = {}
         self._pending: set[int] = set()
@@ -136,10 +214,10 @@ class ThumbnailRenderer(QObject):
             return
         assert self._pdf is not None
 
-        placeholder = self._placeholder(size)
+        placeholder = QIcon(blank_page(size))
         wanted: list[int] = []
         for page in range(1, self._pdf.pageCount() + 1):
-            cached = self._cache_get((page, size.width(), size.height()))
+            cached = self._cache.get((page, size.width(), size.height()))
             item = QListWidgetItem(
                 QIcon(cached) if cached is not None else placeholder,
                 QCoreApplication.translate(_TR_CONTEXT, "Page {0}").format(page),
@@ -164,16 +242,8 @@ class ThumbnailRenderer(QObject):
 
     def invalidate(self, pages: list[int] | None) -> None:
         """Drop cached images for `pages` (1-based), or all of them when
-        `pages` is None - which is what `Operation.affected_pages()`
-        returns for anything that adds, removes or reorders pages, since
-        that shifts every later page's identity."""
-        if pages is None:
-            self._cache.clear()
-            self._cache_bytes = 0
-            return
-        targets = set(pages)
-        for key in [k for k in self._cache if k[0] in targets]:
-            self._cache_drop(key)
+        `pages` is None. See `PixmapCache.invalidate`."""
+        self._cache.invalidate(pages)
 
     def release(self) -> None:
         """Close the document and drop every OS handle on it.
@@ -250,8 +320,8 @@ class ThumbnailRenderer(QObject):
             # grid was rebuilt since). Dropping it is what keeps a late
             # arrival from writing into an item that no longer exists.
             return
-        pixmap = QPixmap.fromImage(self._composite(image, size))
-        self._cache_put((page, size.width(), size.height()), pixmap)
+        pixmap = QPixmap.fromImage(composite_on_white(image, size))
+        self._cache.put((page, size.width(), size.height()), pixmap)
         item = self._items.get(page)
         if item is not None:
             item.setIcon(QIcon(pixmap))
@@ -259,55 +329,7 @@ class ThumbnailRenderer(QObject):
         if not self._pending:
             self.idle.emit()
 
-    @staticmethod
-    def _composite(rendered: QImage, size: QSize) -> QImage:
-        """QtPdf leaves any unpainted area of a page fully transparent
-        (alpha=0) rather than opaque white - most visible on
-        blank/near-empty pages. Composite onto a white backdrop so a
-        thumbnail always reads as a page, not as "nothing" wherever the
-        source PDF painted nothing."""
-        page_image = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
-        page_image.fill(Qt.GlobalColor.white)
-        painter = QPainter(page_image)
-        painter.drawImage(0, 0, rendered)
-        painter.end()
-        return page_image
-
-    @staticmethod
-    def _placeholder(size: QSize) -> QIcon:
-        """A blank page at exactly the requested size, so an item's
-        `QIcon.actualSize()` is correct before its pixels arrive."""
-        pixmap = QPixmap(size)
-        pixmap.fill(Qt.GlobalColor.white)
-        return QIcon(pixmap)
-
-    # --- cache ------------------------------------------------------------
-
-    def _cache_get(self, key: _CacheKey) -> QPixmap | None:
-        pixmap = self._cache.get(key)
-        if pixmap is not None:
-            self._cache.move_to_end(key)  # LRU: mark as most recently used
-        return pixmap
-
-    def _cache_put(self, key: _CacheKey, pixmap: QPixmap) -> None:
-        if key in self._cache:
-            self._cache_drop(key)
-        self._cache[key] = pixmap
-        self._cache_bytes += _pixmap_bytes(pixmap)
-        while self._cache_bytes > _CACHE_BUDGET_BYTES and len(self._cache) > 1:
-            self._cache_drop(next(iter(self._cache)))  # oldest first
-
-    def _cache_drop(self, key: _CacheKey) -> None:
-        pixmap = self._cache.pop(key, None)
-        if pixmap is not None:
-            self._cache_bytes -= _pixmap_bytes(pixmap)
-
     @property
     def cache_size(self) -> int:
         """Number of cached page images (for tests)."""
         return len(self._cache)
-
-
-def _pixmap_bytes(pixmap: QPixmap) -> int:
-    return pixmap.width() * pixmap.height() * 4  # ARGB32
-

@@ -196,6 +196,9 @@ def _build_toolbar(window: MainWindow) -> None:
 
 
 def build_view_menu(window: MainWindow) -> None:
+    # Phase 6c: the page view is the primary pane, so the standard zoom
+    # shortcuts act on it. Thumbnail sizing keeps its own actions under
+    # Ctrl+Shift - it is now sidebar navigation, not the main view.
     window.zoom_in_action = QAction(window.tr("Zoom &In"), window)
     # QKeySequence.StandardKey.ZoomIn resolves to the literal "Ctrl++"
     # on this platform (confirmed via QKeySequence.keyBindings), but
@@ -210,20 +213,45 @@ def build_view_menu(window: MainWindow) -> None:
     window.zoom_in_action.setShortcuts(
         [*QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomIn), QKeySequence("Ctrl+=")]
     )
-    window.zoom_in_action.triggered.connect(window._zoom_in)
+    window.zoom_in_action.triggered.connect(window._page_zoom_in)
 
     window.zoom_out_action = QAction(window.tr("Zoom &Out"), window)
     window.zoom_out_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
-    window.zoom_out_action.triggered.connect(window._zoom_out)
+    window.zoom_out_action.triggered.connect(window._page_zoom_out)
 
     window.reset_zoom_action = QAction(window.tr("&Reset Zoom"), window)
     window.reset_zoom_action.setShortcut("Ctrl+0")
-    window.reset_zoom_action.triggered.connect(window._reset_zoom)
+    window.reset_zoom_action.triggered.connect(window._page_reset_zoom)
+
+    window.fit_width_action = QAction(window.tr("Fit &Width"), window)
+    window.fit_width_action.setShortcut("Ctrl+1")
+    window.fit_width_action.triggered.connect(window._fit_width)
+
+    window.fit_page_action = QAction(window.tr("Fit &Page"), window)
+    window.fit_page_action.setShortcut("Ctrl+2")
+    window.fit_page_action.triggered.connect(window._fit_page)
+
+    window.larger_thumbnails_action = QAction(window.tr("&Larger Thumbnails"), window)
+    window.larger_thumbnails_action.setShortcut("Ctrl+Shift+=")
+    window.larger_thumbnails_action.triggered.connect(window._zoom_in)
+
+    window.smaller_thumbnails_action = QAction(window.tr("&Smaller Thumbnails"), window)
+    window.smaller_thumbnails_action.setShortcut("Ctrl+Shift+-")
+    window.smaller_thumbnails_action.triggered.connect(window._zoom_out)
+
+    window.reset_thumbnails_action = QAction(window.tr("Reset &Thumbnail Size"), window)
+    window.reset_thumbnails_action.setShortcut("Ctrl+Shift+0")
+    window.reset_thumbnails_action.triggered.connect(window._reset_zoom)
 
     window.toggle_toolbar_action = QAction(window.tr("Show &Toolbar"), window)
     window.toggle_toolbar_action.setCheckable(True)
     window.toggle_toolbar_action.setChecked(True)
     window.toggle_toolbar_action.toggled.connect(window._toggle_toolbar)
+
+    window.toggle_sidebar_action = QAction(window.tr("Show &Sidebar"), window)
+    window.toggle_sidebar_action.setCheckable(True)
+    window.toggle_sidebar_action.setChecked(True)
+    window.toggle_sidebar_action.toggled.connect(window._toggle_sidebar)
 
     window.toggle_statusbar_action = QAction(window.tr("Show Status &Bar"), window)
     window.toggle_statusbar_action.setCheckable(True)
@@ -240,7 +268,15 @@ def build_view_menu(window: MainWindow) -> None:
     view_menu.addAction(window.zoom_out_action)
     view_menu.addAction(window.reset_zoom_action)
     view_menu.addSeparator()
+    view_menu.addAction(window.fit_width_action)
+    view_menu.addAction(window.fit_page_action)
+    view_menu.addSeparator()
+    view_menu.addAction(window.larger_thumbnails_action)
+    view_menu.addAction(window.smaller_thumbnails_action)
+    view_menu.addAction(window.reset_thumbnails_action)
+    view_menu.addSeparator()
     view_menu.addAction(window.toggle_toolbar_action)
+    view_menu.addAction(window.toggle_sidebar_action)
     view_menu.addAction(window.toggle_statusbar_action)
     view_menu.addSeparator()
     view_menu.addAction(window.full_screen_action)

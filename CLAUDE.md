@@ -2183,3 +2183,88 @@ Verified visually per convention: grabbed the real window mid-render
 (correctly-sized white placeholders in a proper grid - importantly not
 the "black empty tab" failure mode) and settled (all 12 pages rendered,
 correct order, "12 page(s)" in the status bar).
+
+### 6c — page viewer + sidebar (in progress)
+
+`gui/page_canvas.py`'s `PageCanvas` is the first slice that visibly
+changes the product: a tab is no longer a thumbnail grid alone. The
+grid becomes a navigation sidebar (`DocumentTab` now holds a
+`QSplitter` of `thumbnail_list` + `canvas`) and a continuous,
+scrollable, zoomable page view becomes the primary pane.
+`thumbnail_list` keeps its name, its API and every behaviour the suite
+drives (selection, context menu, drag-reorder) - only where it sits on
+screen changed.
+
+Done: continuous scroll, zoom, fit width/page, viewport-limited
+rendering, click-a-thumbnail-to-scroll. Still to come in 6c: text
+selection, find, outline, links.
+
+**Scene units are device pixels, not points under a view transform.**
+Each page is rendered at exactly the pixel size it occupies and
+`transform()` stays at identity, so zooming in gives a genuinely
+sharper page instead of a magnified blurry one; fit modes compute a
+zoom factor from the viewport rather than calling `fitInView`.
+
+**Viewport-limited rendering lands here**, which is the fix
+`docs/GUI_PLAN.md` §3.5.1 flagged for 6b's eviction cliff. Only pages
+intersecting the viewport plus a two-page lookahead are requested - it
+matters far more here than for thumbnails, since a full-size page costs
+~2 MB against a thumbnail's 75 KB. **Placeholders are painted, never
+allocated**: `PageItem.paint()` draws a white rect and the page number
+when it has no pixmap, because a real placeholder `QPixmap` per page
+would cost ~1 GB for 500 unrendered A4 pages at 100%.
+
+**Zoom is two separate controls now.** The page view took the standard
+shortcuts (Ctrl+= / Ctrl+- / Ctrl+0, plus Ctrl+1 fit width, Ctrl+2 fit
+page) because it is the primary pane; thumbnail sizing kept its exact
+behaviour under Ctrl+Shift and gained its own
+`larger_thumbnails_action` / `smaller_thumbnails_action` /
+`reset_thumbnails_action`. Three existing tests moved to those actions
+- same coverage, different action driving it.
+
+**Two real bugs found here, both of which produced a silently *blank*
+viewer that still reported itself idle** - and both found by printing
+`rendered_page_count`, not by looking at a screenshot, which is worth
+remembering: a blank white page view looks plausible enough to pass a
+glance.
+
+1. `_pending` was keyed by page number only. After a zoom, the
+   still-in-flight old-size request made `_request_visible` skip the
+   page as "already requested"; that result then arrived, was correctly
+   dropped for being the wrong size, and *nothing re-requested it*.
+   Every zoom - including the fit-width that runs on first show - left
+   the viewer blank.
+2. `_on_page_rendered` discarded from `_pending` **before** checking the
+   delivered size, so a late result for a superseded zoom cleared the
+   entry belonging to the *current* request. `wait_until_idle` then
+   returned early with nothing drawn. Only reproducible with two zooms
+   in a row and no wait between them - a single-step debug script
+   showed everything working.
+
+Both fixed by making `_pending` a `dict[page, (width, height)]`:
+requests are re-issued when the size differs, and a delivered result
+only clears the entry when its size is the one still wanted. Regression
+tests: `test_a_zoom_change_re_renders_rather_than_going_blank` and
+`test_two_rapid_zooms_still_render`.
+
+**`QPdfDocument.getSelection()` is unusable in PySide6 6.11.1** -
+verified, not assumed: it returns an invalid, empty `QPdfSelection` for
+every point range tried, including ranges squarely over text that
+`getAllText()` happily reports on the same page. `getSelectionAtIndex()`
+*does* work and returns correct top-left-origin PDF-point rects
+(`"ALPHA"` -> `(50, 86, 65, 14)` on a page whose baselines are at
+y=100/300/550). So text selection has to be built from
+`getAllText().bounds()` - one polygon per line, confirmed: 3 lines ->
+3 polygons, a dense page -> 45 - mapped to the `\r\n`-separated lines of
+`getAllText().text()`, then a binary search within the line. Walking a
+page character by character is not an option: `getSelectionAtIndex` costs
+~906 us per call, 2.6 s for a 2923-character page.
+
+`QPdfSearchModel` works but is **asynchronous** (timer-driven; one
+`processEvents()` is not enough - it needed ~0.14 s and repeated turns
+before `count()` became non-zero), and `QPdfBookmarkModel` works
+directly, giving Title and Page per row.
+
+The canvas holds the working file open exactly as the thumbnail
+renderer does, so `_discard_tab` now releases both before
+`close_session()` - same Windows secure-wipe discipline.

@@ -16,10 +16,16 @@ handlers to each tab's list signals as tabs are created.
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtWidgets import QListWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QListWidget, QListWidgetItem, QSplitter, QVBoxLayout, QWidget
 
 from gui.controller import AppController
+from gui.page_canvas import PageCanvas
 from gui.rendering import ThumbnailRenderer
+
+#: The thumbnail sidebar is navigation, not the main event - wide
+#: enough for one column of thumbnails at the default 120 px.
+_SIDEBAR_MAX_WIDTH = 260
+_SIDEBAR_DEFAULT_WIDTH = 170
 
 
 class DocumentTab(QWidget):
@@ -55,9 +61,34 @@ class DocumentTab(QWidget):
         # - see ThumbnailRenderer.release).
         self.renderer = ThumbnailRenderer(self.thumbnail_list, self)
 
+        # Phase 6c: the thumbnail grid becomes a navigation sidebar and
+        # the page viewer becomes the primary pane. `thumbnail_list`
+        # keeps its name and its behaviour (selection, context menu,
+        # drag-reordering) - only where it sits on screen changed.
+        self.canvas = PageCanvas()
+        self.thumbnail_list.setMaximumWidth(_SIDEBAR_MAX_WIDTH)
+
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.addWidget(self.thumbnail_list)
+        self.splitter.addWidget(self.canvas)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([_SIDEBAR_DEFAULT_WIDTH, 700])
+
+        # Clicking a thumbnail scrolls the page view to it. Deliberately
+        # one-way: syncing the selection back from the viewer's scroll
+        # position would fight the user's own selection (the context
+        # menu and every page-range tool read selectedItems()).
+        self.thumbnail_list.itemClicked.connect(self._on_thumbnail_clicked)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.thumbnail_list)
+        layout.addWidget(self.splitter)
+
+    def _on_thumbnail_clicked(self, item: QListWidgetItem) -> None:
+        page = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(page, int):
+            self.canvas.scroll_to_page(page)
 
     def document_name(self) -> str:
         """User-facing name for this tab's document: a Rename

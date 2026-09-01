@@ -15,6 +15,7 @@ from pathlib import Path
 import pymupdf
 import pytest
 from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication, QListWidget
 
 from core.ops.organize import DeletePagesOperation, RotatePagesOperation
@@ -135,21 +136,36 @@ def test_a_different_zoom_is_a_separate_cache_entry(
     assert renderer.is_idle
 
 
-def test_the_cache_is_bounded(renderer: ThumbnailRenderer, tmp_path: Path) -> None:
+def test_the_cache_is_bounded(qapp: QApplication) -> None:
     """Without a byte budget a 500-page document at the 720x960 zoom
-    ceiling would hold ~1.4 GB of pixmaps."""
-    import gui.rendering as rendering
+    ceiling would hold ~1.4 GB of pixmaps. Exercised against PixmapCache
+    directly - it is the unit that owns eviction, and constructing it
+    with a real budget is honest about what is under test."""
+    from gui.rendering import PixmapCache
 
-    original = rendering._CACHE_BUDGET_BYTES
-    # 60x80x4 = 19200 bytes per page; a budget of 2.5 pages.
-    rendering._CACHE_BUDGET_BYTES = 48_000
-    try:
-        pdf = _make_pdf(tmp_path / "a.pdf", 8)
-        renderer.render(pdf, SIZE)
-        assert renderer.wait_until_idle()
-        assert renderer.cache_size < 8, "cache grew past its budget"
-    finally:
-        rendering._CACHE_BUDGET_BYTES = original
+    page = QPixmap(QSize(60, 80))  # 60*80*4 = 19_200 bytes
+    cache = PixmapCache(budget_bytes=48_000)  # room for 2 pages, not 3
+    for n in range(1, 6):
+        cache.put((n, 60, 80), page)
+
+    assert len(cache) == 2, "cache grew past its budget"
+    # LRU: the most recent survivors, the oldest evicted.
+    assert cache.get((5, 60, 80)) is not None
+    assert cache.get((1, 60, 80)) is None
+
+
+def test_the_cache_evicts_least_recently_used_first(qapp: QApplication) -> None:
+    from gui.rendering import PixmapCache
+
+    page = QPixmap(QSize(60, 80))
+    cache = PixmapCache(budget_bytes=48_000)
+    cache.put((1, 60, 80), page)
+    cache.put((2, 60, 80), page)
+    cache.get((1, 60, 80))  # touch 1, making 2 the least recently used
+    cache.put((3, 60, 80), page)
+
+    assert cache.get((1, 60, 80)) is not None
+    assert cache.get((2, 60, 80)) is None
 
 
 def test_release_is_idempotent_and_drops_the_document(
