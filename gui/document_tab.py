@@ -15,10 +15,21 @@ handlers to each tab's list signals as tabs are created.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtWidgets import QListWidget, QListWidgetItem, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QListWidget,
+    QListWidgetItem,
+    QSplitter,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from gui.controller import AppController
+from gui.find_bar import FindBar
+from gui.outline_panel import OutlinePanel
 from gui.page_canvas import PageCanvas
 from gui.rendering import ThumbnailRenderer
 
@@ -66,11 +77,33 @@ class DocumentTab(QWidget):
         # keeps its name and its behaviour (selection, context menu,
         # drag-reordering) - only where it sits on screen changed.
         self.canvas = PageCanvas()
-        self.thumbnail_list.setMaximumWidth(_SIDEBAR_MAX_WIDTH)
+        self.outline = OutlinePanel()
+
+        # Pages and Outline share the sidebar. Both are navigation, and
+        # a document usually has far more pages than bookmarks, so they
+        # are tabs rather than a split - one is nearly always empty.
+        self.sidebar = QTabWidget()
+        self.sidebar.setDocumentMode(True)
+        self.sidebar.addTab(self.thumbnail_list, self.tr("Pages"))
+        self.sidebar.addTab(self.outline, self.tr("Outline"))
+        self.sidebar.setMaximumWidth(_SIDEBAR_MAX_WIDTH)
+
+        self.find_bar = FindBar()
+        self.find_bar.setVisible(False)
+        self.find_bar.result_activated.connect(self.canvas.scroll_to_rect)
+        self.find_bar.results_changed.connect(self.canvas.set_highlights)
+        self.outline.page_requested.connect(self.canvas.scroll_to_page)
+
+        viewer = QWidget()
+        viewer_layout = QVBoxLayout(viewer)
+        viewer_layout.setContentsMargins(0, 0, 0, 0)
+        viewer_layout.setSpacing(0)
+        viewer_layout.addWidget(self.find_bar)
+        viewer_layout.addWidget(self.canvas, 1)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.addWidget(self.thumbnail_list)
-        self.splitter.addWidget(self.canvas)
+        self.splitter.addWidget(self.sidebar)
+        self.splitter.addWidget(viewer)
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes([_SIDEBAR_DEFAULT_WIDTH, 700])
@@ -84,6 +117,43 @@ class DocumentTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.splitter)
+
+    def set_document(self, path: Path) -> None:
+        """Point the viewer, outline and find bar at the same document.
+
+        They share the canvas's `QPdfDocument` rather than each opening
+        the file again - one OS handle per tab. That sharing makes the
+        *order* here load-bearing: the models must be detached before
+        the canvas destroys the document they point at, or they are left
+        holding freed memory. Getting this wrong segfaulted the suite,
+        not raised - see `detach_document`.
+        """
+        self.detach_document()
+        loaded = self.canvas.set_document(path)
+        document = self.canvas.document if loaded else None
+        self.outline.set_document(document)
+        self.find_bar.set_document(document)
+
+    def detach_document(self) -> None:
+        """Point the outline and find models away from the canvas's
+        document, so it can be destroyed safely. Idempotent."""
+        self.outline.set_document(None)
+        self.find_bar.set_document(None)
+
+    def clear_document(self) -> None:
+        self.detach_document()
+        self.canvas.clear()
+
+    def release(self) -> None:
+        """Drop every OS handle this tab holds on its working file -
+        the thumbnail renderer's and the page view's - after detaching
+        the models that share the latter. Must run before the tab's
+        session dir is wiped: Windows refuses to unlink an open file,
+        which would defeat the secure wipe.
+        """
+        self.detach_document()
+        self.renderer.release()
+        self.canvas.release()
 
     def _on_thumbnail_clicked(self, item: QListWidgetItem) -> None:
         page = item.data(Qt.ItemDataRole.UserRole)

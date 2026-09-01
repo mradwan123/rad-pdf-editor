@@ -393,7 +393,7 @@ pytest — before the next begins.
 |---|---|
 | **6a** | ✅ **Done.** Decomposed `main_window.py` 1174 → 541 lines (§3.1). Pure move: same 478 tests passing, zero test changes. |
 | **6b** | ✅ **Done.** Rendering layer: async, cached, targeted invalidation (§3.5). UI blocking on a 500-page document went 1065 ms → 10 ms; an edit at the default zoom now re-renders 1 page instead of 500. |
-| **6c** | 🔨 **In progress.** Page viewer + sidebar layout (§3.2). Done: continuous scroll, zoom, fit width/page, viewport-limited rendering. Remaining: text selection, find, outline, links. |
+| **6c** | 🔨 **In progress.** Page viewer + sidebar layout (§3.2). Done: continuous scroll, zoom, fit width/page, viewport-limited rendering, outline panel, find-in-document with highlights. Remaining: text selection, links. |
 | **6d** | Background execution with progress and cancel (§3.5). |
 | **6e** | Markup and insert operations (§3.3) with their canvas tools (§3.4), including the re-editable annotation layer (§3.7); selection-aware dialogs; existing rect tools moved on-canvas. |
 | **6f** | Redaction: rect, document-wide search-and-redact, and the metadata/XMP/bookmark/attachment scrub with its review step (§3.7). Split from 6e because it is security-critical and deserves its own verification pass. |

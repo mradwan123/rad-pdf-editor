@@ -2268,3 +2268,44 @@ directly, giving Title and Page per row.
 The canvas holds the working file open exactly as the thumbnail
 renderer does, so `_discard_tab` now releases both before
 `close_session()` - same Windows secure-wipe discipline.
+
+**Outline and find landed next** (`gui/outline_panel.py`,
+`gui/find_bar.py`). The sidebar became a `QTabWidget` of Pages +
+Outline; the find bar sits above the canvas, hidden until Ctrl+F.
+Search hits are highlighted on the page and Next/Previous scrolls to
+them. Verified visually: highlights land exactly on every occurrence of
+the search term, which is what proves the top-left-origin PDF-point
+mapping is right at the current zoom.
+
+Three real defects found while wiring these, none of which a green test
+would have surfaced on its own:
+
+- **The outline and find models share the canvas's `QPdfDocument`, and
+  destroying it out from under them segfaults the process** - not
+  raises. Both `QPdfBookmarkModel` and `QPdfSearchModel` keep a raw
+  pointer, so `PageCanvas.release()` freed memory they still held.
+  Fixed with `DocumentTab.detach_document()` / `.release()`, which own
+  the ordering (detach models, then release handles, then wipe the
+  session) and are now what `_discard_tab` and the tests' `_force_close`
+  both call. Sharing one document per tab is still right - one OS
+  handle, one release point - but the ordering is load-bearing.
+- **`Signal(dict)` does not work in PySide6.** Emitting a Python dict
+  through a typed signal fails at emit time with
+  `_pythonToCppCopy: Cannot copy-convert (dict) to C++` on stderr and
+  silently delivers nothing, so the find bar's highlights never reached
+  the canvas. `Signal(object)` passes the value through untouched.
+  Found by reading stderr on a run that otherwise looked successful.
+- **`QPdfSearchModel` settles in wall-clock time, not event-loop
+  turns.** A `wait_until_settled` that counted three unchanged
+  `processEvents()` calls returned 0 hits instantly on a document with
+  72 of them - those turns elapse in microseconds while the search
+  needs ~0.1 s. It now measures elapsed quiet time.
+
+Highlight rects are stored on `PageItem` in **PDF points** with a
+separate scale factor, not pre-multiplied into pixels, so a zoom change
+cannot leave them stale - one source of truth for where a hit is.
+
+One Qt testing note worth keeping: `isVisible()` is False for any child
+widget whose window has never been shown, so a "did the find bar
+appear?" assertion has to use `isHidden()` - the flag `setVisible()`
+actually toggles.

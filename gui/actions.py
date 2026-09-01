@@ -97,9 +97,15 @@ def _build_edit_menu(window: MainWindow) -> None:
     window.redo_action.setShortcut("Ctrl+Shift+Z")
     window.redo_action.triggered.connect(window._redo)
 
+    window.find_action = QAction(window.tr("&Find..."), window)
+    window.find_action.setShortcut(QKeySequence.StandardKey.Find)
+    window.find_action.triggered.connect(window._find)
+
     edit_menu = window.menuBar().addMenu(window.tr("&Edit"))
     edit_menu.addAction(window.undo_action)
     edit_menu.addAction(window.redo_action)
+    edit_menu.addSeparator()
+    edit_menu.addAction(window.find_action)
 
 
 def _tool_categories(window: MainWindow) -> list[tuple[str, list[str]]]:

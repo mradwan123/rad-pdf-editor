@@ -134,6 +134,11 @@ def _force_close(window: MainWindow) -> None:
     each, and leaves closeEvent nothing to ask about.
     """
     for tab in window.tabs():
+        # Same ordering _discard_tab uses: release the document handles
+        # (and detach the outline/find models sharing them) before the
+        # session dir is wiped. Skipping this segfaults - the models
+        # outlive the QPdfDocument they point at.
+        tab.release()
         tab.controller.close_session()
     window.close()
 
@@ -2340,4 +2345,80 @@ def test_page_zoom_actions_do_not_resize_thumbnails(qapp: QApplication, tmp_path
 
     window.larger_thumbnails_action.trigger()
     assert window.thumbnail_size.width() > thumbnail_size.width()
+    _force_close(window)
+
+
+def _make_searchable_pdf(path: Path, pages: int = 3) -> Path:
+    import fitz
+
+    doc = fitz.open()
+    for i in range(pages):
+        page = doc.new_page(width=400, height=600)
+        page.insert_text((50, 100), f"Section {i + 1}", fontsize=18)
+        page.insert_text((50, 200), "the needle appears here", fontsize=12)
+    doc.set_toc([[1, "Alpha", 1], [1, "Beta", 2]])
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_find_bar_is_hidden_until_asked_for(qapp: QApplication, tmp_path: Path) -> None:
+    src = _make_searchable_pdf(tmp_path / "src.pdf")
+    window = MainWindow()
+    tab = _open_tab(window, src)
+
+    # isHidden(), not isVisible(): a child widget is never "visible"
+    # while its window has not been shown, so isVisible() would be False
+    # in both states here. isHidden() is the flag setVisible() actually
+    # toggles.
+    assert tab.find_bar.isHidden()
+    window.find_action.trigger()
+    assert not tab.find_bar.isHidden()
+    _force_close(window)
+
+
+def test_find_highlights_hits_on_the_page_view(qapp: QApplication, tmp_path: Path) -> None:
+    """End to end: typing in the find bar must reach the canvas as
+    highlight rectangles. The signal carrying them is declared
+    Signal(object) rather than Signal(dict) because PySide6 cannot
+    marshal a dict through a typed signal - it fails at emit time and
+    delivers nothing, which is invisible without checking the canvas."""
+    src = _make_searchable_pdf(tmp_path / "src.pdf", 3)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    window.find_action.trigger()
+
+    tab.find_bar.input.setText("needle")
+    assert tab.find_bar.wait_until_settled() == 3
+
+    assert tab.canvas._items[0]._highlights, "the canvas never received the hits"
+    _force_close(window)
+
+
+def test_find_next_scrolls_the_page_view_to_the_hit(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_searchable_pdf(tmp_path / "src.pdf", 4)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    window.find_action.trigger()
+    tab.find_bar.input.setText("needle")
+    tab.find_bar.wait_until_settled()
+
+    for _ in range(3):
+        tab.find_bar.find_next()
+
+    assert tab.canvas.current_page == 3
+    _force_close(window)
+
+
+def test_the_outline_panel_navigates_the_page_view(qapp: QApplication, tmp_path: Path) -> None:
+    src = _make_searchable_pdf(tmp_path / "src.pdf", 4)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+
+    assert tab.outline.has_outline
+    tab.outline.page_requested.emit(2)
+
+    assert tab.canvas.current_page == 2
     _force_close(window)

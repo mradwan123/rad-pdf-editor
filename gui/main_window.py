@@ -104,6 +104,7 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
     previous_tab_action: QAction
     undo_action: QAction
     redo_action: QAction
+    find_action: QAction
     build_workflow_action: QAction
     run_workflow_action: QAction
     zoom_in_action: QAction
@@ -278,9 +279,14 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
         if tab is not None:
             tab.canvas.fit_page()
 
+    def _find(self) -> None:
+        tab = self.current_tab
+        if tab is not None:
+            tab.find_bar.activate()
+
     def _toggle_sidebar(self, checked: bool) -> None:
         for tab in self.tabs():
-            tab.thumbnail_list.setVisible(checked)
+            tab.sidebar.setVisible(checked)
 
     def _toggle_toolbar(self, checked: bool) -> None:
         self.toolbar.setVisible(checked)
@@ -578,10 +584,10 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
             # Both return as soon as their geometry exists; pixels stream
             # in (gui/rendering.py, gui/page_canvas.py).
             tab.renderer.render(working_path, self.thumbnail_size)
-            tab.canvas.set_document(working_path)
+            tab.set_document(working_path)
         else:
             tab.thumbnail_list.clear()
-            tab.canvas.clear()
+            tab.clear_document()
 
     def _update_action_state(self) -> None:
         controller = self.controller

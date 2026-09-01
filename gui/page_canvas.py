@@ -85,6 +85,16 @@ class PageItem(QGraphicsItem):
         self._width = width
         self._height = height
         self._pixmap: QPixmap | None = None
+        #: Highlight rects in *PDF points*, scaled at paint time. Kept
+        #: in points rather than pixels so a zoom change cannot leave
+        #: them stale - there is one source of truth for where a hit is.
+        self._highlights: list[QRectF] = []
+        self._scale = 1.0
+
+    def set_highlights(self, rects: list[QRectF], scale: float) -> None:
+        self._highlights = rects
+        self._scale = scale
+        self.update()
 
     def boundingRect(self) -> QRectF:  # noqa: N802 - Qt override
         return QRectF(0.0, 0.0, self._width, self._height)
@@ -119,6 +129,16 @@ class PageItem(QGraphicsItem):
             painter.fillRect(rect, Qt.GlobalColor.white)
             painter.setPen(QPen(QColor(150, 150, 150)))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(self.page_number))
+        for hit in self._highlights:
+            painter.fillRect(
+                QRectF(
+                    hit.x() * self._scale,
+                    hit.y() * self._scale,
+                    hit.width() * self._scale,
+                    hit.height() * self._scale,
+                ),
+                QColor(255, 214, 0, 110),
+            )
         painter.setPen(QPen(QColor(70, 70, 70)))
         painter.drawRect(rect)
 
@@ -157,6 +177,7 @@ class PageCanvas(QGraphicsView):
         #: zoom cannot clear the entry belonging to the current one.
         self._pending: dict[int, tuple[int, int]] = {}
         self._zoom = 1.0
+        self._highlights: dict[int, list[QRectF]] = {}
         self._fit_mode: str | None = "width"
         self._current_page = 0
 
@@ -201,6 +222,12 @@ class PageCanvas(QGraphicsView):
         self._clear_items()
 
     @property
+    def document(self) -> QPdfDocument | None:
+        """The loaded document, for the QtPdf model classes that work
+        off one (outline, search) - see docs/GUI_PLAN.md §2.1."""
+        return self._pdf
+
+    @property
     def page_count(self) -> int:
         return len(self._items)
 
@@ -208,6 +235,26 @@ class PageCanvas(QGraphicsView):
     def current_page(self) -> int:
         """1-based page at the top of the viewport, or 0 if empty."""
         return self._current_page
+
+    def set_highlights(self, by_page: dict[int, list[QRectF]]) -> None:
+        """Show search hits. Rects are in top-left-origin PDF points -
+        the convention QPdfSearchModel and getSelectionAtIndex both use
+        (verified against a page with text at known positions)."""
+        self._highlights = by_page
+        for item in self._items:
+            item.set_highlights(by_page.get(item.page_number, []), self._zoom)
+
+    def scroll_to_rect(self, page: int, rect: QRectF) -> None:
+        """Put a specific spot on `page` (1-based, PDF points) in view."""
+        if not 1 <= page <= len(self._items):
+            return
+        item = self._items[page - 1]
+        target = item.pos().y() + rect.y() * self._zoom
+        # A third of the way down reads better than pinned to the top.
+        self.verticalScrollBar().setValue(
+            max(0, int(target - self._usable_viewport().height() / 3))
+        )
+        self._on_view_changed()
 
     def invalidate(self, pages: list[int] | None) -> None:
         self._cache.invalidate(pages)
@@ -325,6 +372,8 @@ class PageCanvas(QGraphicsView):
         # showed blank pages after any zoom - including the fit-width
         # that runs on first show.)
         self._pending.clear()
+        for item in self._items:
+            item.set_highlights(self._highlights.get(item.page_number, []), self._zoom)
         self._on_view_changed()
 
     def _on_view_changed(self) -> None:
