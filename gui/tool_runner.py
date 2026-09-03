@@ -25,6 +25,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
 from core.errors import OperationError, PDFEditorError
 from core.model.document import DocumentSession
+from core.model.operation import Operation
 from core.ops.forms import list_form_field_names
 from core.session.session_dir import SessionTempDir
 from core.session.workflow_store import WorkflowStore
@@ -35,6 +36,7 @@ from gui.dialogs.sign_dialog import SignDialog
 from gui.dialogs.tool_dialog_registry import DialogFactory
 from gui.dialogs.workflow_builder_dialog import WorkflowBuilderDialog
 from gui.document_tab import DocumentTab
+from gui.operation_runner import OperationRunner
 from gui.window_parts import WindowPart
 
 
@@ -46,19 +48,43 @@ class ToolRunnerMixin(WindowPart):
 
     @contextmanager
     def _busy_cursor(self) -> Iterator[None]:
-        """Visual feedback around a synchronous operation that might
-        take a moment (large PDFs, compress, N-up rendering, etc.) -
-        deliberately not a background-thread rewrite, just making the
-        otherwise-unresponsive-looking wait visible rather than silent.
+        """Visual feedback around a wait that still runs on the UI
+        thread.
 
-        Phase 6d (docs/GUI_PLAN.md) replaces this with a real worker
-        plus progress and cancel."""
+        Phase 6d moved applied operations onto a worker
+        (`_apply_operation`), so this now covers only the two cases that
+        are not a single `Operation`:
+
+        - undo/redo, which restore a snapshot - a file copy, not a
+          computation, so a progress bar would be noise; and
+        - running a saved workflow, which is a whole `Pipeline` against
+          a throwaway session rather than one operation applied to a
+          tab.
+
+        Both are candidates for the worker later; neither is the freeze
+        6d existed to fix."""
         self.statusBar().showMessage(self.tr("Working..."))
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             yield
         finally:
             QApplication.restoreOverrideCursor()
+
+    def _apply_operation(self, tab: DocumentTab, operation: Operation) -> bool:
+        """Apply `operation` to `tab` off the UI thread, behind a
+        cancellable progress dialog. False means the user cancelled;
+        errors propagate as before so each call site's existing
+        handling is unchanged."""
+        applied = OperationRunner(self).run(
+            operation,
+            lambda: tab.controller.apply_operation(operation),
+            operation.describe(),
+        )
+        if applied:
+            affected = operation.affected_pages()
+            tab.renderer.invalidate(affected)
+            tab.canvas.invalidate(affected)
+        return applied
 
     # --- tools ---------------------------------------------------------------
 
@@ -111,11 +137,12 @@ class ToolRunnerMixin(WindowPart):
             try:
                 plugin = self.registry.get(tool_id)
                 operation = plugin.build_operation(**dialog.values())
-                with self._busy_cursor():
-                    tab.controller.apply_operation(operation)
-                affected = operation.affected_pages()
-                tab.renderer.invalidate(affected)
-                tab.canvas.invalidate(affected)
+                if not self._apply_operation(tab, operation):
+                    # Cancelled: nothing was applied, so a tab created
+                    # for this run has no document and must not linger.
+                    if created_tab:
+                        self._discard_tab(tab)
+                    return
             except PDFEditorError as exc:
                 if created_tab:
                     # Don't strand an empty tab for a Merge that built
@@ -188,11 +215,7 @@ class ToolRunnerMixin(WindowPart):
         context-menu rotate/delete) to one specific tab's document."""
         try:
             operation = self.registry.get(tool_id).build_operation(**kwargs)
-            with self._busy_cursor():
-                tab.controller.apply_operation(operation)
-            affected = operation.affected_pages()
-            tab.renderer.invalidate(affected)
-            tab.canvas.invalidate(affected)
+            self._apply_operation(tab, operation)
         except PDFEditorError as exc:
             self._show_error(exc)
         # Refresh either way: on success this rebuilds thumbnails from

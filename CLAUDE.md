@@ -2370,3 +2370,55 @@ local *and* a global position; the shorter one is deprecated and warns.
 
 **Phase 6c is complete.** Full suite 543 passed, ruff and
 `mypy core cli gui` clean.
+
+### 6d — background execution with progress and cancel (done)
+
+Applied operations now run on a `QThreadPool` worker behind a
+window-modal, cancellable `QProgressDialog`
+(`gui/operation_runner.py`). **Operations are unchanged** - they stay
+synchronous and know nothing about threads. `AppController` is already
+Qt-free, so `apply_operation` off-thread touches no widgets, and the
+modal dialog stops the user driving the same document from two
+directions while the event loop keeps turning.
+
+**`SupportsProgress` (`core/model/progress.py`) is a mixin, not a
+parameter.** Adding `apply(self, doc, progress=None)` to the frozen
+base would look additive and is not: every existing subclass declares
+`apply(self, doc)` and would raise `TypeError` when called with it. The
+runner feature-detects with `isinstance` and shows an indeterminate bar
+for everything else, which is honest - most operations here are one
+opaque call into pikepdf/LibreOffice/ocrmypdf/Ghostscript and genuinely
+cannot report a percentage. Instrumented so far: Rotate, Grayscale,
+Deskew, Header/Footer, Bates.
+
+**Cancellation is cooperative and safe because of the existing document
+model**, not because of anything added here: an operation writes to a
+*new* working file and the session only adopts it on success, so
+cancelling discards a file the document never referenced. The progress
+callback raises `OperationCancelledError` (new in `core/errors.py` -
+named with the `Error` suffix because ruff's N818 requires it, matching
+every other name there) and the operation unwinds through its normal
+error path. An *opaque* operation cannot be interrupted at all: Cancel
+stops the wait and the result is discarded when it arrives, and the
+dialog says "Cancelling..." rather than pretending the work stopped.
+
+Progress is reported at the *top* of each page loop with the count
+completed so far. That covers both the do-this-page and skip-this-page
+branches of the fitz loops without duplicating the call, and gives the
+callback a chance to cancel *before* each page rather than only after.
+
+The runner blocks its caller on a nested `QEventLoop` rather than
+handing back a future: every call site is written as "apply, then
+refresh", and making them all asynchronous would be far larger than 6d
+needs - the point is that the *event loop* keeps running, not that the
+call site stops being sequential.
+
+`_busy_cursor` survives for exactly two things that are not a single
+`Operation`: undo/redo (a snapshot restore - a file copy, where a
+progress bar would be noise) and running a saved workflow (a whole
+`Pipeline` against a throwaway session). Both are candidates for the
+worker later; neither is the freeze 6d existed to fix.
+
+One mypy note: `isinstance(op, SupportsProgress)` stored in a *bool*
+does not narrow the object, so the runner holds the narrowed value
+(`reporter = op if isinstance(...) else None`) instead of casting.

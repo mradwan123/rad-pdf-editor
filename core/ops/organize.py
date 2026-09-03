@@ -24,6 +24,7 @@ import pikepdf
 from core.errors import OperationError
 from core.model.document import DocumentSession
 from core.model.operation import Operation
+from core.model.progress import SupportsProgress
 from core.ops.common import (
     allocate_working_path,
     next_session,
@@ -84,7 +85,7 @@ class ReorderPagesOperation(Operation):
 
 
 @dataclass
-class RotatePagesOperation(Operation):
+class RotatePagesOperation(Operation, SupportsProgress):
     """Rotates `pages` (1-indexed; empty means all pages) by `angle`
     degrees, relative to their current orientation. `angle` must be a
     multiple of 90."""
@@ -104,8 +105,9 @@ class RotatePagesOperation(Operation):
         with open_pdf(doc.working_path) as pdf:
             total = len(pdf.pages)
             targets = resolve_page_targets(self.pages, total)
-            for n in targets:
+            for done, n in enumerate(targets, start=1):
                 pdf.pages[n - 1].rotate(self.angle, relative=True)
+                self.report_progress(done, len(targets))
             pdf.save(out_path)
 
         return next_session(doc, out_path)

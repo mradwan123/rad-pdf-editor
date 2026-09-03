@@ -47,3 +47,17 @@ class SchemaVersionError(PDFEditorError):
     """Raised when deserializing an Operation, Workflow, or plugin
     manifest whose schema_version is unsupported by the running core.
     """
+
+
+class OperationCancelledError(PDFEditorError):
+    """Raised when the user cancels a running operation.
+
+    A genuinely new category rather than an `OperationError`: nothing
+    went wrong, so callers that report failures to the user should stay
+    quiet for this one. Phase 6d (docs/GUI_PLAN.md §3.5) raises it from
+    an operation's progress callback, which is what makes cancellation
+    cooperative - the operation unwinds through its normal error path
+    and the half-written output is simply never adopted, since every
+    operation writes to a *new* working file and the session only swaps
+    to it on success.
+    """

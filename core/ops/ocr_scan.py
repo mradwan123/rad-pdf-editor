@@ -40,6 +40,7 @@ from PIL import Image
 from core.errors import ConversionError, OperationError
 from core.model.document import DocumentSession
 from core.model.operation import Operation
+from core.model.progress import SupportsProgress
 from core.ops.common import (
     allocate_working_path,
     next_session,
@@ -133,7 +134,7 @@ class OCROperation(Operation):
 
 
 @dataclass
-class DeskewOperation(Operation):
+class DeskewOperation(Operation, SupportsProgress):
     """Corrects rotational skew on `pages` (1-indexed; empty means
     all) by rendering each to a raster image, detecting its dominant
     text-line angle via `deskew.determine_skew`, and re-embedding a
@@ -170,6 +171,7 @@ class DeskewOperation(Operation):
 
                 with fitz.open() as result:
                     for i in range(total):
+                        self.report_progress(i, total)
                         page_num = i + 1
                         if page_num not in targets:
                             result.insert_pdf(src, from_page=i, to_page=i)

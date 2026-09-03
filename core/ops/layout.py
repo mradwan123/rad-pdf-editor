@@ -22,6 +22,7 @@ import pikepdf
 from core.errors import OperationError
 from core.model.document import DocumentSession
 from core.model.operation import Operation
+from core.model.progress import SupportsProgress
 from core.ops.common import (
     allocate_working_path,
     next_session,
@@ -246,7 +247,7 @@ def _grid_columns(pages_per_sheet: int) -> int:
 
 
 @dataclass
-class GrayscaleOperation(Operation):
+class GrayscaleOperation(Operation, SupportsProgress):
     """Rasterizes `pages` (1-indexed; empty means all) to grayscale at
     `dpi` - see module docstring for the vector/text tradeoff."""
 
@@ -272,6 +273,7 @@ class GrayscaleOperation(Operation):
 
                 with fitz.open() as result:
                     for i in range(total):
+                        self.report_progress(i, total)
                         if (i + 1) not in targets:
                             result.insert_pdf(src, from_page=i, to_page=i)
                             continue

@@ -17,6 +17,7 @@ from reportlab.pdfgen import canvas
 from core.errors import OperationError
 from core.model.document import DocumentSession
 from core.model.operation import Operation
+from core.model.progress import SupportsProgress
 from core.ops.common import (
     allocate_working_path,
     next_session,
@@ -46,7 +47,7 @@ def _stamp_page(width: float, height: float, draw: Callable[[canvas.Canvas], Non
 
 
 @dataclass
-class HeaderFooterOperation(Operation):
+class HeaderFooterOperation(Operation, SupportsProgress):
     """Stamps `header_text` at the top and/or `footer_text` at the
     bottom of `pages` (1-indexed; empty means all), centered
     horizontally."""
@@ -70,7 +71,8 @@ class HeaderFooterOperation(Operation):
         with open_pdf(doc.working_path) as pdf:
             total = len(pdf.pages)
             targets = resolve_page_targets(self.pages, total)
-            for n in targets:
+            for done, n in enumerate(targets):
+                self.report_progress(done, len(targets))
                 page = pdf.pages[n - 1]
                 box = [float(x) for x in page.mediabox]
                 width, height = box[2] - box[0], box[3] - box[1]
@@ -123,7 +125,7 @@ _BATES_POSITIONS: dict[str, _BatesDrawFn] = {
 
 
 @dataclass
-class BatesNumberingOperation(Operation):
+class BatesNumberingOperation(Operation, SupportsProgress):
     """Stamps sequential numbers (``{prefix}{counter:0{digits}d}``) on
     `pages` (1-indexed; empty means all), in ascending page order,
     starting at `start`."""
@@ -157,6 +159,7 @@ class BatesNumberingOperation(Operation):
             targets = resolve_page_targets(self.pages, total)  # already ascending + deduped
             draw_fn = _BATES_POSITIONS[self.position]
             for offset, n in enumerate(targets):
+                self.report_progress(offset, len(targets))
                 page = pdf.pages[n - 1]
                 box = [float(x) for x in page.mediabox]
                 width, height = box[2] - box[0], box[3] - box[1]
