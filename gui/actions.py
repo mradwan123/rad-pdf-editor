@@ -97,6 +97,14 @@ def _build_edit_menu(window: MainWindow) -> None:
     window.redo_action.setShortcut("Ctrl+Shift+Z")
     window.redo_action.triggered.connect(window._redo)
 
+    window.copy_action = QAction(window.tr("&Copy"), window)
+    window.copy_action.setShortcut(QKeySequence.StandardKey.Copy)
+    window.copy_action.triggered.connect(window._copy_selection)
+
+    window.select_all_action = QAction(window.tr("Select &All on Page"), window)
+    window.select_all_action.setShortcut(QKeySequence.StandardKey.SelectAll)
+    window.select_all_action.triggered.connect(window._select_all_on_page)
+
     window.find_action = QAction(window.tr("&Find..."), window)
     window.find_action.setShortcut(QKeySequence.StandardKey.Find)
     window.find_action.triggered.connect(window._find)
@@ -104,6 +112,9 @@ def _build_edit_menu(window: MainWindow) -> None:
     edit_menu = window.menuBar().addMenu(window.tr("&Edit"))
     edit_menu.addAction(window.undo_action)
     edit_menu.addAction(window.redo_action)
+    edit_menu.addSeparator()
+    edit_menu.addAction(window.copy_action)
+    edit_menu.addAction(window.select_all_action)
     edit_menu.addSeparator()
     edit_menu.addAction(window.find_action)
 

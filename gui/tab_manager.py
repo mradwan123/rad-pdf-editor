@@ -86,6 +86,9 @@ class TabManagementMixin(WindowPart):
         tab.thumbnail_list.customContextMenuRequested.connect(
             lambda pos, t=tab: self._show_thumbnail_context_menu(t, pos)
         )
+        tab.canvas.link_activated.connect(
+            lambda page, url, t=tab: self._on_link_activated(t, page, url)
+        )
         if activate:
             index = self.tab_widget.addTab(tab, self._tab_label(tab))
             self.tab_widget.setCurrentIndex(index)

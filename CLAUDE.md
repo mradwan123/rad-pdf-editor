@@ -2309,3 +2309,64 @@ One Qt testing note worth keeping: `isVisible()` is False for any child
 widget whose window has never been shown, so a "did the find bar
 appear?" assertion has to use `isHidden()` - the flag `setVisible()`
 actually toggles.
+
+**Text selection and links finished 6c** (`gui/text_selection.py`).
+
+**`QPdfDocument.getSelection()` is unusable in PySide6 6.11.1**, so the
+obvious API for drag-selection is simply not available - verified, not
+assumed: it returns an invalid, empty `QPdfSelection` for every point
+range tried, including ranges squarely over text `getAllText()` reports
+on the same page. `PageTextIndex` rebuilds the capability from the
+parts that work:
+
+- `getAllText(page)` gives the text plus `bounds()`, one polygon per
+  line, in top-left-origin PDF points.
+- The text separates lines with `\r\n`, so line *k* matches polygon
+  *k*. **That correspondence is the whole mechanism**, and a page where
+  the two counts disagree is treated as unselectable rather than
+  mis-mapped - a wrong mapping would silently select the wrong text.
+- A point resolves to a line by y, then to a character by binary
+  searching that line's index range with `getSelectionAtIndex`,
+  comparing against each glyph's *midpoint* so clicking the right half
+  of a character selects past it, as a caret does.
+
+Walking a page character by character is not viable at ~906 us per
+`getSelectionAtIndex` call (2.6 s for a 2923-character page); the
+binary search is ~log2(line length) calls and probed rects are cached.
+
+Verified against text at known positions rather than "a selection
+happened": a drag from x=50 to x=175 on a line reading
+"ALPHA BETA GAMMA" selects exactly `"ALPHA BETA"`, and the painted
+rects land on the text (confirmed by grabbing the real window).
+
+**Selection is within one page**, deliberately. A drag that wanders
+onto another page keeps extending on the page it started on -
+cross-page selection is separate work, and silently selecting the wrong
+page's text would be worse than not extending. Selection is also
+dropped when an operation invalidates the page it is on, since the
+indices no longer refer to the same text.
+
+**External links are shown, not opened.** `QPdfLinkModel` reports an
+internal link's target page (0-based) and an external link's URL with
+page **-1**; the canvas normalises that to page 0 so callers can tell
+them apart. Internal links navigate. External ones only surface the
+address in the status bar - SPEC.md section 1 forbids network access
+anywhere in this app, and a click on an untrusted document's link is
+exactly the wrong trigger for outbound traffic from a
+confidential-documents tool. Deciding this either way was a product
+call, not an oversight.
+
+Interaction note: the canvas is `NoDrag`, not `ScrollHandDrag`, because
+the left button now selects text; scrolling is the wheel and the
+scrollbars, as in any PDF reader's select mode. Selection rects are
+held on `PageItem` in PDF points with a separate scale factor, the same
+as search highlights, so zoom cannot leave them stale.
+
+Testing note: real drags are not simulatable under
+`QT_QPA_PLATFORM=offscreen`, so the handlers are driven with real
+`QMouseEvent` objects - the same technique the sign-placement tests use
+for `QGraphicsSceneMouseEvent`. Use the overload that takes both a
+local *and* a global position; the shorter one is deprecated and warns.
+
+**Phase 6c is complete.** Full suite 543 passed, ruff and
+`mypy core cli gui` clean.

@@ -4,8 +4,8 @@ Extends `docs/SPEC.md` section 4's roadmap with a sixth phase. SPEC.md
 stays the source of truth for the locked requirements and the frozen
 interfaces; this document is the design record for Phase 6 only.
 
-Status: **6a and 6b done**; 6c onward not started. Slice status is in
-the §4 table.
+Status: **6a, 6b and 6c done**; 6d onward not started. Slice status is
+in the §4 table.
 
 ---
 
@@ -305,6 +305,45 @@ which does work correctly. Per-character rects cost ~906 us each
 (2.6 s for a dense page), so a point maps to a character by locating
 the line and binary-searching within it, never by walking the page.
 
+### 3.2.2 Text selection, without the API that was meant to do it
+
+`QPdfDocument.getSelection()` - point-range selection, exactly what a
+drag needs - is unusable in PySide6 6.11.1. It returns an invalid,
+empty `QPdfSelection` for every range tried, including ranges squarely
+over text `getAllText()` reports on the same page.
+
+`gui/text_selection.py`'s `PageTextIndex` rebuilds the capability from
+the parts that do work:
+
+- `getAllText(page)` gives the page text plus `bounds()`, which is one
+  polygon per line in top-left-origin PDF points.
+- The text separates lines with `\r\n`, so line *k* of the text maps
+  to polygon *k* of `bounds()` - that correspondence is the whole
+  mechanism, and a page where the two counts disagree is treated as
+  unselectable rather than mis-mapped.
+- A point resolves to a line by its y, then to a character by binary
+  searching that line's index range with `getSelectionAtIndex`,
+  comparing against each glyph's midpoint so clicking the right half of
+  a character selects past it.
+
+Walking a page character by character is not viable:
+`getSelectionAtIndex` costs ~906 us per call, 2.6 s for a
+2923-character page. A binary search is ~log2(line length) calls, and
+probed rects are cached.
+
+**Selection is within one page.** A drag that wanders onto another page
+keeps extending on the page it started on. Cross-page selection is a
+separate piece of work; silently selecting the wrong page's text would
+be worse than not extending.
+
+**External links are shown, not opened.** `QPdfLinkModel` reports an
+internal link's target page and an external link's URL (with page -1).
+Internal links navigate. External ones are surfaced in the status bar
+and never handed to a browser: SPEC.md section 1 forbids network access
+anywhere in this app, and a click on an untrusted document's link is
+exactly the wrong trigger for outbound traffic from a
+confidential-documents tool.
+
 ### 3.6 Design system
 
 - **Icons.** The app currently has none — the toolbar is four text
@@ -393,7 +432,7 @@ pytest — before the next begins.
 |---|---|
 | **6a** | ✅ **Done.** Decomposed `main_window.py` 1174 → 541 lines (§3.1). Pure move: same 478 tests passing, zero test changes. |
 | **6b** | ✅ **Done.** Rendering layer: async, cached, targeted invalidation (§3.5). UI blocking on a 500-page document went 1065 ms → 10 ms; an edit at the default zoom now re-renders 1 page instead of 500. |
-| **6c** | 🔨 **In progress.** Page viewer + sidebar layout (§3.2). Done: continuous scroll, zoom, fit width/page, viewport-limited rendering, outline panel, find-in-document with highlights. Remaining: text selection, links. |
+| **6c** | ✅ **Done.** Page viewer + sidebar layout (§3.2): continuous scroll, zoom, fit width/page, viewport-limited rendering, outline panel, find-in-document with highlights, drag-to-select text with copy, and links. |
 | **6d** | Background execution with progress and cancel (§3.5). |
 | **6e** | Markup and insert operations (§3.3) with their canvas tools (§3.4), including the re-editable annotation layer (§3.7); selection-aware dialogs; existing rect tools moved on-canvas. |
 | **6f** | Redaction: rect, document-wide search-and-redact, and the metadata/XMP/bookmark/attachment scrub with its review step (§3.7). Split from 6e because it is security-critical and deserves its own verification pass. |

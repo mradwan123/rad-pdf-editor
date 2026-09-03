@@ -32,6 +32,7 @@ from pathlib import Path
 from PySide6.QtCore import (
     QCoreApplication,
     QDeadlineTimer,
+    QModelIndex,
     QPointF,
     QRectF,
     QSize,
@@ -39,8 +40,17 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QResizeEvent
-from PySide6.QtPdf import QPdfDocument, QPdfPageRenderer
+from PySide6.QtGui import (
+    QColor,
+    QGuiApplication,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPen,
+    QPixmap,
+    QResizeEvent,
+)
+from PySide6.QtPdf import QPdfDocument, QPdfLinkModel, QPdfPageRenderer
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsScene,
@@ -51,6 +61,7 @@ from PySide6.QtWidgets import (
 
 from core.logging_config import get_logger
 from gui.rendering import PixmapCache, composite_on_white
+from gui.text_selection import PageTextIndex
 
 log = get_logger(__name__)
 
@@ -89,10 +100,16 @@ class PageItem(QGraphicsItem):
         #: in points rather than pixels so a zoom change cannot leave
         #: them stale - there is one source of truth for where a hit is.
         self._highlights: list[QRectF] = []
+        self._selection: list[QRectF] = []
         self._scale = 1.0
 
     def set_highlights(self, rects: list[QRectF], scale: float) -> None:
         self._highlights = rects
+        self._scale = scale
+        self.update()
+
+    def set_selection(self, rects: list[QRectF], scale: float) -> None:
+        self._selection = rects
         self._scale = scale
         self.update()
 
@@ -116,6 +133,15 @@ class PageItem(QGraphicsItem):
     def has_pixmap(self) -> bool:
         return self._pixmap is not None
 
+    def _scaled(self, rect: QRectF) -> QRectF:
+        """A rect held in PDF points, in this item's pixel space."""
+        return QRectF(
+            rect.x() * self._scale,
+            rect.y() * self._scale,
+            rect.width() * self._scale,
+            rect.height() * self._scale,
+        )
+
     def paint(
         self,
         painter: QPainter,
@@ -129,16 +155,10 @@ class PageItem(QGraphicsItem):
             painter.fillRect(rect, Qt.GlobalColor.white)
             painter.setPen(QPen(QColor(150, 150, 150)))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(self.page_number))
+        for hit in self._selection:
+            painter.fillRect(self._scaled(hit), QColor(64, 132, 214, 90))
         for hit in self._highlights:
-            painter.fillRect(
-                QRectF(
-                    hit.x() * self._scale,
-                    hit.y() * self._scale,
-                    hit.width() * self._scale,
-                    hit.height() * self._scale,
-                ),
-                QColor(255, 214, 0, 110),
-            )
+            painter.fillRect(self._scaled(hit), QColor(255, 214, 0, 110))
         painter.setPen(QPen(QColor(70, 70, 70)))
         painter.drawRect(rect)
 
@@ -149,6 +169,10 @@ class PageCanvas(QGraphicsView):
     #: 1-based page number of the page currently at the top of the view.
     current_page_changed = Signal(int)
     zoom_changed = Signal(float)
+    #: (1-based page, url). An internal link reports its target page
+    #: and an empty url; an external link reports page 0 and its url.
+    link_activated = Signal(int, str)
+    selection_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -158,7 +182,9 @@ class PageCanvas(QGraphicsView):
         self.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         self.setBackgroundBrush(QColor(35, 36, 38))
         self.setAccessibleName(self.tr("Page view"))
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        # NoDrag: the left button selects text. Scrolling is the wheel
+        # and the scrollbars, as in every PDF reader's select mode.
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
 
         # Unparented and owned solely by these attributes, so clearing
         # them destroys the objects under refcounting. A QPdfDocument
@@ -178,6 +204,11 @@ class PageCanvas(QGraphicsView):
         self._pending: dict[int, tuple[int, int]] = {}
         self._zoom = 1.0
         self._highlights: dict[int, list[QRectF]] = {}
+        self._text_indices: dict[int, PageTextIndex] = {}
+        self._links: dict[int, list[tuple[QRectF, int, str]]] = {}
+        self._selection_page: int | None = None
+        self._selection_anchor = 0
+        self._selection_focus = 0
         self._fit_mode: str | None = "width"
         self._current_page = 0
 
@@ -215,6 +246,9 @@ class PageCanvas(QGraphicsView):
             self._pdf = None
         self._path = None
         self._pending.clear()
+        self._text_indices.clear()
+        self._links.clear()
+        self.clear_selection()
 
     def clear(self) -> None:
         self.release()
@@ -256,8 +290,168 @@ class PageCanvas(QGraphicsView):
         )
         self._on_view_changed()
 
+    # --- text selection ---------------------------------------------------
+
+    @property
+    def selected_text(self) -> str:
+        """The currently selected text, or "" when nothing is selected."""
+        if self._selection_page is None:
+            return ""
+        index = self._text_index(self._selection_page)
+        if index is None:
+            return ""
+        return index.text_between(self._selection_anchor, self._selection_focus)
+
+    def clear_selection(self) -> None:
+        page = self._selection_page
+        self._selection_page = None
+        self._selection_anchor = self._selection_focus = 0
+        if page is not None and 1 <= page <= len(self._items):
+            self._items[page - 1].set_selection([], self._zoom)
+        self.selection_changed.emit("")
+
+    def select_all_on_page(self, page: int) -> None:
+        index = self._text_index(page)
+        if index is None or index.is_empty:
+            return
+        self._selection_page = page
+        self._selection_anchor = 0
+        self._selection_focus = index.length
+        self._paint_selection()
+
+    def copy_selection(self) -> bool:
+        """Copy the selection to the clipboard. False if there was
+        nothing selected."""
+        text = self.selected_text
+        if not text:
+            return False
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is None:  # no clipboard under some headless setups
+            return False
+        clipboard.setText(text)
+        return True
+
+    def _text_index(self, page: int) -> PageTextIndex | None:
+        if self._pdf is None or not 1 <= page <= len(self._items):
+            return None
+        cached = self._text_indices.get(page)
+        if cached is None:
+            cached = PageTextIndex(self._pdf, page)
+            self._text_indices[page] = cached
+        return cached
+
+    def _paint_selection(self) -> None:
+        page = self._selection_page
+        if page is None:
+            return
+        index = self._text_index(page)
+        if index is None:
+            return
+        rects = index.rects_between(self._selection_anchor, self._selection_focus)
+        self._items[page - 1].set_selection(rects, self._zoom)
+        self.selection_changed.emit(self.selected_text)
+
+    def _page_point(self, scene_pos: QPointF) -> tuple[int, QPointF] | None:
+        """Which page `scene_pos` is over, and where on it in PDF points."""
+        for item in self._items:
+            rect = QRectF(item.pos(), item.boundingRect().size())
+            if rect.contains(scene_pos):
+                local = scene_pos - item.pos()
+                return item.page_number, QPointF(
+                    local.x() / self._zoom, local.y() / self._zoom
+                )
+        return None
+
+    # --- links ------------------------------------------------------------
+
+    def _page_links(self, page: int) -> list[tuple[QRectF, int, str]]:
+        """(rect in PDF points, 1-based target page or 0, url) per link."""
+        if self._pdf is None:
+            return []
+        cached = self._links.get(page)
+        if cached is not None:
+            return cached
+        model = QPdfLinkModel()
+        model.setDocument(self._pdf)
+        model.setPage(page - 1)
+        links: list[tuple[QRectF, int, str]] = []
+        for row in range(model.rowCount(QModelIndex())):
+            index = model.index(row, 0)
+            rect = model.data(index, QPdfLinkModel.Role.Rectangle.value)
+            target = model.data(index, QPdfLinkModel.Role.Page.value)
+            url = model.data(index, QPdfLinkModel.Role.Url.value)
+            if not isinstance(rect, QRectF):
+                continue
+            # An external link reports page -1 and carries a url; an
+            # internal one reports a 0-based target page.
+            page_target = target + 1 if isinstance(target, int) and target >= 0 else 0
+            links.append((rect, page_target, url.toString() if url is not None else ""))
+        self._links[page] = links
+        return links
+
+    def _link_at(self, page: int, point: QPointF) -> tuple[int, str] | None:
+        for rect, target, url in self._page_links(page):
+            if rect.contains(point):
+                return target, url
+        return None
+
+    # --- mouse ------------------------------------------------------------
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt override
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        hit = self._page_point(self.mapToScene(event.position().toPoint()))
+        if hit is None:
+            self.clear_selection()
+            super().mousePressEvent(event)
+            return
+        page, point = hit
+        link = self._link_at(page, point)
+        if link is not None:
+            target, url = link
+            self.link_activated.emit(target, url)
+            return
+        index = self._text_index(page)
+        if index is None or index.is_empty:
+            self.clear_selection()
+            return
+        self._selection_page = page
+        self._selection_anchor = self._selection_focus = index.index_at(point)
+        self._paint_selection()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt override
+        if self._selection_page is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            super().mouseMoveEvent(event)
+            return
+        hit = self._page_point(self.mapToScene(event.position().toPoint()))
+        # A drag that wanders onto another page keeps extending within
+        # the page it started on. Selection across pages is a separate
+        # piece of work - see docs/GUI_PLAN.md - and silently selecting
+        # the wrong page's text would be worse than not extending.
+        if hit is None or hit[0] != self._selection_page:
+            return
+        index = self._text_index(self._selection_page)
+        if index is None:
+            return
+        self._selection_focus = index.index_at(hit[1])
+        self._paint_selection()
+
     def invalidate(self, pages: list[int] | None) -> None:
         self._cache.invalidate(pages)
+        # The text and links of an edited page have changed too.
+        if pages is None:
+            self._text_indices.clear()
+            self._links.clear()
+            self.clear_selection()
+        else:
+            for page in pages:
+                self._text_indices.pop(page, None)
+                self._links.pop(page, None)
+            # A selection on an edited page refers to text that may no
+            # longer exist at those indices, so it is dropped too.
+            if self._selection_page in pages:
+                self.clear_selection()
         for item in self._items:
             if pages is None or item.page_number in pages:
                 item.set_pixmap(None)
@@ -374,6 +568,7 @@ class PageCanvas(QGraphicsView):
         self._pending.clear()
         for item in self._items:
             item.set_highlights(self._highlights.get(item.page_number, []), self._zoom)
+        self._paint_selection()
         self._on_view_changed()
 
     def _on_view_changed(self) -> None:

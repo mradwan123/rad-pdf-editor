@@ -105,6 +105,8 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
     undo_action: QAction
     redo_action: QAction
     find_action: QAction
+    copy_action: QAction
+    select_all_action: QAction
     build_workflow_action: QAction
     run_workflow_action: QAction
     zoom_in_action: QAction
@@ -283,6 +285,30 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
         tab = self.current_tab
         if tab is not None:
             tab.find_bar.activate()
+
+    def _copy_selection(self) -> None:
+        tab = self.current_tab
+        if tab is None:
+            return
+        if tab.canvas.copy_selection():
+            self.statusBar().showMessage(self.tr("Copied selection"), 3000)
+
+    def _select_all_on_page(self) -> None:
+        tab = self.current_tab
+        if tab is not None:
+            tab.canvas.select_all_on_page(tab.canvas.current_page)
+
+    def _on_link_activated(self, tab: DocumentTab, page: int, url: str) -> None:
+        """Internal links navigate. External ones are *shown, not
+        opened*: SPEC.md section 1 forbids network access anywhere in
+        this app, and handing a URL to the user's browser would start
+        outbound traffic from a confidential-documents tool on nothing
+        more than a click on an untrusted document's link. The address
+        is surfaced so the user can act on it deliberately."""
+        if page > 0:
+            tab.canvas.scroll_to_page(page)
+        elif url:
+            self.statusBar().showMessage(self.tr("Link: {0}").format(url), 8000)
 
     def _toggle_sidebar(self, checked: bool) -> None:
         for tab in self.tabs():
