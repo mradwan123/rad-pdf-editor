@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QLineEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -84,6 +85,28 @@ class BaseToolDialog(QDialog):
         """Return the kwargs to pass to `ToolPlugin.build_operation()`.
         Subclasses must override this."""
         raise NotImplementedError
+
+    def set_page_selection(self, pages: list[int]) -> None:
+        """Prefill this dialog's page-range field from the pages the
+        user already selected in the sidebar.
+
+        Twelve of the tool dialogs express a page range as a
+        comma-separated `QLineEdit` named `pages`, so this fills that
+        one field by convention rather than each dialog reimplementing
+        it. A dialog without such a field simply has nothing to do -
+        which is why this looks the attribute up instead of requiring
+        an override.
+
+        Without it, selecting pages 2, 5 and 9 in the sidebar and then
+        opening Rotate still asked the user to *type* "2,5,9".
+        """
+        if not pages:
+            return
+        field = getattr(self, "pages", None)
+        if isinstance(field, QLineEdit) and not field.text().strip():
+            # Only when empty: a value the dialog set for itself, or one
+            # the user has already typed, is not ours to overwrite.
+            field.setText(",".join(str(p) for p in pages))
 
     def release_resources(self) -> None:
         """Drop any OS resource (an open file handle, a loaded

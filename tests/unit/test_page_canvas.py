@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pymupdf
 import pytest
+from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QApplication
 
 from gui.page_canvas import _LOOKAHEAD, _MAX_ZOOM, _MIN_ZOOM, PageCanvas
@@ -201,3 +202,62 @@ def test_current_page_follows_the_scroll_position(canvas: PageCanvas, tmp_path: 
 
     assert canvas.current_page == 7
     assert seen and seen[-1] == 7, "current_page_changed must actually fire"
+
+
+def _red_fraction(image: object) -> float:
+    """Fraction of sampled pixels that are strongly red."""
+    from PySide6.QtGui import QImage
+
+    assert isinstance(image, QImage)
+    reds = total = 0
+    for y in range(0, image.height(), 3):
+        for x in range(0, image.width(), 3):
+            colour = image.pixelColor(x, y)
+            total += 1
+            if colour.red() > 150 and colour.green() < 120 and colour.blue() < 120:
+                reds += 1
+    return reds / max(total, 1)
+
+
+def _make_annotated_pdf(path: Path) -> Path:
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page(width=200, height=200)
+    annot = doc[0].add_rect_annot(fitz.Rect(20, 20, 180, 180))
+    annot.set_colors(stroke=(1, 0, 0), fill=(1, 0, 0))
+    annot.set_opacity(1.0)
+    annot.update()
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_the_page_view_actually_draws_annotations(canvas: PageCanvas, tmp_path: Path) -> None:
+    """Regression: QtPdf omits annotations from render() unless
+    RenderFlag.Annotations is passed. Without it, highlights, notes and
+    shapes were created correctly in the file and were simply invisible
+    - which no assertion about the *document* would ever catch."""
+    canvas.set_document(_make_annotated_pdf(tmp_path / "annot.pdf"))
+    canvas.set_zoom(1.0)
+    assert canvas.wait_until_idle()
+
+    item = canvas._items[0]
+    assert item.has_pixmap
+    assert _red_fraction(item._pixmap.toImage()) > 0.3, "the annotation was not rendered"
+
+
+def test_thumbnails_also_draw_annotations(qapp: QApplication, tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QListWidget
+
+    from gui.rendering import ThumbnailRenderer
+
+    widget = QListWidget()
+    renderer = ThumbnailRenderer(widget)
+    try:
+        renderer.render(_make_annotated_pdf(tmp_path / "annot.pdf"), QSize(120, 120))
+        assert renderer.wait_until_idle()
+        icon = widget.item(0).icon()
+        assert _red_fraction(icon.pixmap(QSize(120, 120)).toImage()) > 0.3
+    finally:
+        renderer.release()

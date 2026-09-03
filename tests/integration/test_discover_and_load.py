@@ -16,6 +16,10 @@ from core.model.document import DocumentSession
 from core.registry.registry import Registry, discover_and_load
 
 EXPECTED_TOOL_IDS = {
+    # Phase 6e - the first operations that edit content *on* a page.
+    "add_annotation",
+    "edit_annotation",
+    "delete_annotation",
     "merge",
     "extract_pages",
     "reorder_pages",

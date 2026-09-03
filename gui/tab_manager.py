@@ -89,6 +89,12 @@ class TabManagementMixin(WindowPart):
         tab.canvas.link_activated.connect(
             lambda page, url, t=tab: self._on_link_activated(t, page, url)
         )
+        tab.canvas.annotation_drawn.connect(
+            lambda page, kind, payload, t=tab: self._on_annotation_drawn(t, page, kind, payload)
+        )
+        tab.canvas.annotation_moved.connect(
+            lambda page, annot_id, rect, t=tab: self._on_annotation_moved(t, page, annot_id, rect)
+        )
         if activate:
             index = self.tab_widget.addTab(tab, self._tab_label(tab))
             self.tab_widget.setCurrentIndex(index)

@@ -40,6 +40,14 @@ from gui.operation_runner import OperationRunner
 from gui.window_parts import WindowPart
 
 
+def _selected_pages(tab: DocumentTab) -> list[int]:
+    """1-based page numbers currently selected in the tab's sidebar."""
+    return sorted(
+        int(item.data(Qt.ItemDataRole.UserRole))
+        for item in tab.thumbnail_list.selectedItems()
+    )
+
+
 class ToolRunnerMixin(WindowPart):
     """Tool dialogs, thumbnail-driven operations, and workflows."""
 
@@ -120,6 +128,8 @@ class ToolRunnerMixin(WindowPart):
         # securely wipes that dir, which Windows then refuses to do
         # (WinError 32). Released deterministically here, on every path
         # out, rather than left to destruction order.
+        if tab is not None:
+            dialog.set_page_selection(_selected_pages(tab))
         try:
             if dialog.exec() != BaseToolDialog.DialogCode.Accepted:
                 return
@@ -157,6 +167,64 @@ class ToolRunnerMixin(WindowPart):
             self._refresh()
         finally:
             dialog.release_resources()
+
+    # --- annotations ----------------------------------------------------------
+
+    def _make_markup_handler(self, kind: str) -> Any:
+        return lambda: self._markup_selection(kind)
+
+    def _make_canvas_tool_handler(self, tool: str) -> Any:
+        return lambda: self._set_canvas_tool(tool)
+
+    def _set_canvas_tool(self, tool: str) -> None:
+        for tab in self.tabs():
+            tab.canvas.set_tool(tool)
+
+    def _markup_selection(self, kind: str) -> None:
+        """Highlight/underline/strikeout/squiggly the selected text.
+
+        One annotation over every rect of the selection rather than one
+        per line, so a highlight spanning three lines is a single undo
+        step and a single audit entry."""
+        tab = self.current_tab
+        if tab is None or not tab.controller.is_open:
+            self._show_error_message(self.tr("Open a document first."))
+            return
+        page, rects = tab.canvas.selection_markup_rects()
+        if not rects:
+            self._show_error_message(self.tr("Select some text first."))
+            return
+        self._apply_to_tab(
+            tab, "add_annotation", page=page, kind=kind, rects=rects
+        )
+        tab.canvas.clear_selection()
+
+    def _on_annotation_drawn(self, tab: DocumentTab, page: int, kind: str, payload: Any) -> None:
+        """A shape, ink stroke or note drawn directly on the page."""
+        if kind == "ink":
+            self._apply_to_tab(tab, "add_annotation", page=page, kind=kind, strokes=payload)
+        else:
+            self._apply_to_tab(tab, "add_annotation", page=page, kind=kind, rect=tuple(payload))
+
+    def _on_annotation_moved(
+        self, tab: DocumentTab, page: int, annot_id: str, rect: Any
+    ) -> None:
+        """A picked annotation was dragged to a new position."""
+        self._apply_to_tab(
+            tab, "edit_annotation", page=page, annot_id=annot_id, rect=tuple(rect)
+        )
+
+    def _delete_annotation_under_cursor(self) -> None:
+        """Delete the annotation the page view currently has selected."""
+        tab = self.current_tab
+        if tab is None or not tab.controller.is_open:
+            return
+        selected = tab.canvas.selected_annotation
+        if selected is None:
+            self._show_error_message(self.tr("Select an annotation first."))
+            return
+        page, annot_id = selected
+        self._apply_to_tab(tab, "delete_annotation", page=page, annot_id=annot_id)
 
     # --- thumbnail-driven operations ------------------------------------------
 

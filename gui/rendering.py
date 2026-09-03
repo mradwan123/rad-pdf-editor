@@ -44,7 +44,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QDeadlineTimer, QObject, QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
-from PySide6.QtPdf import QPdfDocument, QPdfPageRenderer
+from PySide6.QtPdf import QPdfDocument, QPdfDocumentRenderOptions, QPdfPageRenderer
 from PySide6.QtWidgets import QListWidget, QListWidgetItem
 
 from core.logging_config import get_logger
@@ -150,6 +150,20 @@ def composite_on_white(rendered: QImage, size: QSize) -> QImage:
     return page_image
 
 
+
+def annotation_render_options() -> QPdfDocumentRenderOptions:
+    """Render options that actually draw annotations.
+
+    QtPdf omits annotations by default - verified: a page whose only
+    content is a solid red square annotation renders completely blank
+    without this flag, and 67% red with it. Every renderer in this app
+    must pass these, or highlights, notes and shapes are created
+    correctly and are simply invisible.
+    """
+    options = QPdfDocumentRenderOptions()
+    options.setRenderFlags(QPdfDocumentRenderOptions.RenderFlag.Annotations)
+    return options
+
 def blank_page(size: QSize) -> QPixmap:
     """A blank page at exactly `size`, used until a real render arrives.
     Sized precisely so an item's `QIcon.actualSize()` and a canvas
@@ -238,7 +252,7 @@ class ThumbnailRenderer(QObject):
         self._pending = set(wanted)
         renderer = self._ensure_renderer()
         for page in wanted:
-            renderer.requestPage(page - 1, size)  # QtPdf is 0-based
+            renderer.requestPage(page - 1, size, annotation_render_options())
 
     def invalidate(self, pages: list[int] | None) -> None:
         """Drop cached images for `pages` (1-based), or all of them when

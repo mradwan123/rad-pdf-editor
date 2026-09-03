@@ -2422,3 +2422,72 @@ worker later; neither is the freeze 6d existed to fix.
 One mypy note: `isinstance(op, SupportsProgress)` stored in a *bool*
 does not narrow the object, so the runner holds the narrowed value
 (`reporter = op if isinstance(...) else None`) instead of casting.
+
+### 6e — annotations: markup, shapes, ink, notes (done)
+
+`core/ops/annotate.py` adds the first operations in this codebase that
+edit content *on* a page rather than transforming the document:
+`AddAnnotationOperation`, `EditAnnotationOperation`,
+`DeleteAnnotationOperation`, registered as `add_annotation` /
+`edit_annotation` / `delete_annotation`.
+
+**One Add operation with a `kind` discriminator**, not nine
+near-identical classes: highlight/underline/strikeout/squiggly, rect/
+circle/line, ink and note all take the same parameters (a page, a
+region, a colour) and differ only in which PyMuPDF call runs.
+
+**Identity is a UUID in `/NM`, proven not assumed.** A pikepdf round
+trip renumbered the same three annotations from xrefs `[7, 9, 13]` to
+`[4, 5, 6]` while their `/NM` values survived - which is exactly the
+situation every operation creates, since each writes a new working
+file. PyMuPDF exposes `/NM` as `annot.info["id"]` for *reading* but has
+no setter (`set_info(id=...)` raises `TypeError`), so it is stamped
+with `doc.xref_set_key(annot.xref, "NM", "(...)")`. Note
+`xref_get_key` returns the **unwrapped** string - comparing against
+`"(uuid)"` silently matches nothing, which quietly made the first
+edit/delete probe a no-op that still looked successful.
+
+**Text markup acts on the text selection, not a dragged rect** - the
+familiar gesture, and it reuses 6c's selection machinery. A selection
+spanning several lines becomes **one** annotation over several rects
+(PyMuPDF's markup helpers accept a list), so it is one undo step and
+one audit entry rather than one per line.
+
+**Undo is precise where it can be.** Undoing an *add* is a
+`DeleteAnnotationOperation` addressing the id the add assigned - not a
+snapshot restore. Undoing a *delete* is a snapshot restore, because
+deletion discards the annotation's full definition (appearance stream,
+quad points, author, dates) which no add could faithfully rebuild from
+an id - the same honest choice OCR and the other lossy operations here
+already make.
+
+**The bug that would have shipped invisible: QtPdf does not render
+annotations by default.** Everything worked - the operations created
+correct annotations, `fitz` confirmed their type and geometry, the
+tests passed - and the page view showed a clean, unmarked page. Caught
+only by looking at a screenshot. `QPdfDocumentRenderOptions` needs
+`RenderFlag.Annotations`; measured on a page whose sole content is a
+solid red square annotation, the red fraction goes from **0.000 to
+0.672** with the flag. Both renderers now pass
+`gui/rendering.annotation_render_options()`, with pixel-level
+regression tests for the page view and the thumbnails, since no
+assertion about the *document* could ever catch this.
+
+**Re-editable annotations (decision 9)** are hit-tested from the
+document itself: `PageCanvas._page_annotations` reads rects and ids via
+fitz, so clicking picks the topmost annotation, dragging moves it
+(committing an `EditAnnotationOperation`), and Delete removes it. The
+index is dropped per page on invalidation, along with any selection on
+an edited page.
+
+**Selection-aware dialogs**: `BaseToolDialog.set_page_selection()`
+fills the `pages` field that twelve tool dialogs share by convention,
+and `_run_tool` passes the sidebar's selection. It only fills an
+*empty* field - a value the dialog set for itself, or one the user
+typed, is not ours to overwrite. Selecting pages 2, 5 and 9 and opening
+Rotate no longer asks the user to type "2,5,9".
+
+Also: `add_ink_annot` wants plain `(x, y)` float pairs and rejects
+`fitz.Point` outright ("arg must be seq of seq of float pairs").
+
+Still to come in 6e: insert-content operations (text box, image).

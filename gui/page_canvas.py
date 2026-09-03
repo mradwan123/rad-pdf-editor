@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import fitz
 from PySide6.QtCore import (
     QCoreApplication,
     QDeadlineTimer,
@@ -60,7 +61,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.logging_config import get_logger
-from gui.rendering import PixmapCache, composite_on_white
+from gui.rendering import PixmapCache, annotation_render_options, composite_on_white
 from gui.text_selection import PageTextIndex
 
 log = get_logger(__name__)
@@ -79,6 +80,10 @@ _ZOOM_FACTOR = 1.25
 #: never been shown or resized reports 0x0, and "nothing is visible"
 #: would mean nothing ever renders. Headless tests hit this constantly.
 _NOMINAL_VIEWPORT = QSize(900, 700)
+#: Smaller than this and a drag was a stray click, not a shape.
+_MIN_DRAW_SIZE = 4.0
+#: A sticky note is a fixed-size marker, not a dragged region.
+_NOTE_SIZE = 20.0
 
 
 class PageItem(QGraphicsItem):
@@ -101,6 +106,11 @@ class PageItem(QGraphicsItem):
         #: them stale - there is one source of truth for where a hit is.
         self._highlights: list[QRectF] = []
         self._selection: list[QRectF] = []
+        #: The shape currently being dragged out, in PDF points.
+        self._draft: QRectF | None = None
+        self._draft_strokes: list[list[tuple[float, float]]] = []
+        #: Outline of the annotation currently picked, in PDF points.
+        self._picked: QRectF | None = None
         self._scale = 1.0
 
     def set_highlights(self, rects: list[QRectF], scale: float) -> None:
@@ -111,6 +121,21 @@ class PageItem(QGraphicsItem):
     def set_selection(self, rects: list[QRectF], scale: float) -> None:
         self._selection = rects
         self._scale = scale
+        self.update()
+
+    def set_picked(self, rect: QRectF | None) -> None:
+        self._picked = rect
+        self.update()
+
+    def set_draft(
+        self,
+        rect: QRectF | None,
+        strokes: list[list[tuple[float, float]]] | None = None,
+    ) -> None:
+        """Preview of the annotation being dragged out, before it is
+        committed as an Operation."""
+        self._draft = rect
+        self._draft_strokes = strokes or []
         self.update()
 
     def boundingRect(self) -> QRectF:  # noqa: N802 - Qt override
@@ -159,8 +184,28 @@ class PageItem(QGraphicsItem):
             painter.fillRect(self._scaled(hit), QColor(64, 132, 214, 90))
         for hit in self._highlights:
             painter.fillRect(self._scaled(hit), QColor(255, 214, 0, 110))
+        if self._picked is not None:
+            painter.setPen(QPen(QColor(64, 132, 214), 2, Qt.PenStyle.DashLine))
+            painter.drawRect(self._scaled(self._picked))
+        if self._draft is not None:
+            painter.setPen(QPen(QColor(64, 132, 214), 1, Qt.PenStyle.DashLine))
+            painter.drawRect(self._scaled(self._draft))
+        for stroke in self._draft_strokes:
+            painter.setPen(QPen(QColor(214, 64, 64), 2))
+            for (x0, y0), (x1, y1) in zip(stroke, stroke[1:], strict=False):
+                painter.drawLine(
+                    QPointF(x0 * self._scale, y0 * self._scale),
+                    QPointF(x1 * self._scale, y1 * self._scale),
+                )
         painter.setPen(QPen(QColor(70, 70, 70)))
         painter.drawRect(rect)
+
+
+#: Tools that draw a new annotation directly on the page. Text markup
+#: is deliberately *not* here: highlight/underline/strikeout act on the
+#: current text selection instead, which is both the familiar gesture
+#: and a reuse of the selection machinery built in 6c.
+DRAW_TOOLS = ("rect", "circle", "line", "ink", "note")
 
 
 class PageCanvas(QGraphicsView):
@@ -173,6 +218,14 @@ class PageCanvas(QGraphicsView):
     #: and an empty url; an external link reports page 0 and its url.
     link_activated = Signal(int, str)
     selection_changed = Signal(str)
+    #: (1-based page, kind, payload) for a shape/ink/note drawn on the
+    #: canvas. `payload` is a bottom-left-origin rect tuple, or a list
+    #: of strokes for ink.
+    annotation_drawn = Signal(int, str, object)
+    #: (1-based page, annotation id, new bottom-left-origin rect).
+    annotation_moved = Signal(int, str, object)
+    #: (1-based page, annotation id) or (0, "") when nothing is picked.
+    annotation_picked = Signal(int, str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -209,6 +262,17 @@ class PageCanvas(QGraphicsView):
         self._selection_page: int | None = None
         self._selection_anchor = 0
         self._selection_focus = 0
+        #: "select", or one of gui.page_canvas.DRAW_TOOLS.
+        self._tool = "select"
+        self._draw_page: int | None = None
+        self._draw_origin: QPointF | None = None
+        self._draw_strokes: list[list[tuple[float, float]]] = []
+        #: page -> [(rect in top-left PDF points, annotation id)], lazily
+        #: read from the document and dropped whenever a page changes.
+        self._annotations: dict[int, list[tuple[QRectF, str]]] = {}
+        self._picked: tuple[int, str] | None = None
+        self._move_origin: QPointF | None = None
+        self._move_rect: QRectF | None = None
         self._fit_mode: str | None = "width"
         self._current_page = 0
 
@@ -248,7 +312,9 @@ class PageCanvas(QGraphicsView):
         self._pending.clear()
         self._text_indices.clear()
         self._links.clear()
+        self._annotations.clear()
         self.clear_selection()
+        self.clear_annotation_selection()
 
     def clear(self) -> None:
         self.release()
@@ -289,6 +355,117 @@ class PageCanvas(QGraphicsView):
             max(0, int(target - self._usable_viewport().height() / 3))
         )
         self._on_view_changed()
+
+    # --- existing annotations ---------------------------------------------
+
+    @property
+    def selected_annotation(self) -> tuple[int, str] | None:
+        """(1-based page, id) of the picked annotation, or None."""
+        return self._picked
+
+    def clear_annotation_selection(self) -> None:
+        picked = self._picked
+        self._picked = None
+        self._move_origin = None
+        self._move_rect = None
+        if picked is not None and 1 <= picked[0] <= len(self._items):
+            self._items[picked[0] - 1].set_picked(None)
+        self.annotation_picked.emit(0, "")
+
+    def _page_annotations(self, page: int) -> list[tuple[QRectF, str]]:
+        """Annotations on `page`, newest last, in top-left PDF points.
+
+        Read straight from the document rather than tracked separately:
+        the page image already shows them (PyMuPDF renders annotations
+        into the page), so this only needs to supply hit-testing.
+        """
+        if self._path is None:
+            return []
+        cached = self._annotations.get(page)
+        if cached is not None:
+            return cached
+        found: list[tuple[QRectF, str]] = []
+        try:
+            with fitz.open(self._path) as document:
+                if 1 <= page <= document.page_count:
+                    for annot in document[page - 1].annots():
+                        rect = annot.rect
+                        annot_id = annot.info.get("id", "")
+                        if annot_id:
+                            found.append(
+                                (
+                                    QRectF(
+                                        rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0
+                                    ),
+                                    annot_id,
+                                )
+                            )
+        except Exception as exc:  # noqa: BLE001 - hit-testing must never crash the view
+            log.warning("Could not read annotations on page %s: %s", page, exc)
+        self._annotations[page] = found
+        return found
+
+    def _annotation_at(self, page: int, point: QPointF) -> tuple[QRectF, str] | None:
+        # Reversed: the most recently added annotation is on top, so it
+        # is what a click on overlapping annotations should pick.
+        for rect, annot_id in reversed(self._page_annotations(page)):
+            if rect.contains(point):
+                return rect, annot_id
+        return None
+
+    def _pick_annotation(self, page: int, rect: QRectF, annot_id: str) -> None:
+        self.clear_annotation_selection()
+        self._picked = (page, annot_id)
+        self._move_rect = QRectF(rect)
+        self._items[page - 1].set_picked(rect)
+        self.annotation_picked.emit(page, annot_id)
+
+    # --- tools ------------------------------------------------------------
+
+    @property
+    def tool(self) -> str:
+        return self._tool
+
+    def set_tool(self, tool: str) -> None:
+        """Switch between selecting text and drawing an annotation."""
+        if tool != "select" and tool not in DRAW_TOOLS:
+            raise ValueError(f"Unknown canvas tool {tool!r}")
+        self._tool = tool
+        self._clear_draft()
+        if tool != "select":
+            self.clear_selection()
+        self.setCursor(
+            Qt.CursorShape.CrossCursor if tool != "select" else Qt.CursorShape.IBeamCursor
+        )
+
+    def _clear_draft(self) -> None:
+        page = self._draw_page
+        self._draw_page = None
+        self._draw_origin = None
+        self._draw_strokes = []
+        if page is not None and 1 <= page <= len(self._items):
+            self._items[page - 1].set_draft(None)
+
+    def selection_markup_rects(self) -> tuple[int, list[tuple[float, float, float, float]]]:
+        """The current text selection as bottom-left-origin rects, ready
+        for AddAnnotationOperation. `(0, [])` when nothing is selected.
+
+        PageTextIndex works in top-left-origin points (QtPdf's
+        convention); operations in this codebase take bottom-left. The
+        flip happens here, once, rather than in every caller.
+        """
+        page = self._selection_page
+        if page is None or self._pdf is None:
+            return 0, []
+        index = self._text_index(page)
+        if index is None:
+            return 0, []
+        height = self._pdf.pagePointSize(page - 1).height()
+        rects = [
+            (r.x(), height - r.y() - r.height(), r.x() + r.width(), height - r.y())
+            for r in index.rects_between(self._selection_anchor, self._selection_focus)
+        ]
+        return page, rects
 
     # --- text selection ---------------------------------------------------
 
@@ -407,6 +584,16 @@ class PageCanvas(QGraphicsView):
             super().mousePressEvent(event)
             return
         page, point = hit
+        if self._tool in DRAW_TOOLS:
+            self._begin_draw(page, point)
+            return
+        annotation = self._annotation_at(page, point)
+        if annotation is not None:
+            rect, annot_id = annotation
+            self._pick_annotation(page, rect, annot_id)
+            self._move_origin = point
+            return
+        self.clear_annotation_selection()
         link = self._link_at(page, point)
         if link is not None:
             target, url = link
@@ -420,7 +607,110 @@ class PageCanvas(QGraphicsView):
         self._selection_anchor = self._selection_focus = index.index_at(point)
         self._paint_selection()
 
+    def _begin_draw(self, page: int, point: QPointF) -> None:
+        self._draw_page = page
+        self._draw_origin = point
+        self._draw_strokes = [[(point.x(), point.y())]] if self._tool == "ink" else []
+        if self._tool == "note":
+            # A note is a point, not a drag - commit it immediately.
+            self._commit_draw(point)
+
+    def _extend_draw(self, point: QPointF) -> None:
+        if self._draw_page is None or self._draw_origin is None:
+            return
+        item = self._items[self._draw_page - 1]
+        if self._tool == "ink":
+            self._draw_strokes[-1].append((point.x(), point.y()))
+            item.set_draft(None, self._draw_strokes)
+            return
+        item.set_draft(QRectF(self._draw_origin, point).normalized())
+
+    def _commit_draw(self, point: QPointF) -> None:
+        page, origin, tool = self._draw_page, self._draw_origin, self._tool
+        strokes = self._draw_strokes
+        self._clear_draft()
+        if page is None or origin is None or self._pdf is None:
+            return
+        height = self._pdf.pagePointSize(page - 1).height()
+
+        if tool == "ink":
+            if len(strokes) != 1 or len(strokes[0]) < 2:
+                return  # a click, not a stroke
+            flipped = [[(x, height - y) for x, y in strokes[0]]]
+            self.annotation_drawn.emit(page, "ink", flipped)
+            return
+
+        rect = QRectF(origin, point).normalized()
+        if tool == "note":
+            # Anchor a fixed-size marker where the click landed.
+            rect = QRectF(point.x(), point.y(), _NOTE_SIZE, _NOTE_SIZE)
+        elif rect.width() < _MIN_DRAW_SIZE or rect.height() < _MIN_DRAW_SIZE:
+            return  # a stray click, not a shape
+        bottom_left = (
+            rect.x(),
+            height - rect.y() - rect.height(),
+            rect.x() + rect.width(),
+            height - rect.y(),
+        )
+        self.annotation_drawn.emit(page, tool, bottom_left)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt override
+        if (
+            self._picked is not None
+            and self._move_origin is not None
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._finish_move(self.mapToScene(event.position().toPoint()))
+            return
+        if self._draw_page is not None and event.button() == Qt.MouseButton.LeftButton:
+            hit = self._page_point(self.mapToScene(event.position().toPoint()))
+            point = hit[1] if hit is not None and hit[0] == self._draw_page else None
+            if point is not None:
+                self._commit_draw(point)
+            else:
+                self._clear_draft()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _finish_move(self, scene_pos: QPointF) -> None:
+        assert self._picked is not None
+        page, annot_id = self._picked
+        origin, rect = self._move_origin, self._move_rect
+        self._move_origin = None
+        hit = self._page_point(scene_pos)
+        if hit is None or hit[0] != page or origin is None or rect is None or self._pdf is None:
+            return
+        delta = hit[1] - origin
+        if abs(delta.x()) < _MIN_DRAW_SIZE and abs(delta.y()) < _MIN_DRAW_SIZE:
+            return  # a click to select, not a drag to move
+        moved = rect.translated(delta.x(), delta.y())
+        height = self._pdf.pagePointSize(page - 1).height()
+        self.annotation_moved.emit(
+            page,
+            annot_id,
+            (
+                moved.x(),
+                height - moved.y() - moved.height(),
+                moved.x() + moved.width(),
+                height - moved.y(),
+            ),
+        )
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt override
+        if self._draw_page is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            hit = self._page_point(self.mapToScene(event.position().toPoint()))
+            if hit is not None and hit[0] == self._draw_page:
+                self._extend_draw(hit[1])
+            return
+        if self._picked is not None and self._move_origin is not None and (
+            event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            hit = self._page_point(self.mapToScene(event.position().toPoint()))
+            if hit is not None and hit[0] == self._picked[0] and self._move_rect is not None:
+                delta = hit[1] - self._move_origin
+                moved = self._move_rect.translated(delta.x(), delta.y())
+                self._items[self._picked[0] - 1].set_picked(moved)
+            return
         if self._selection_page is None or not (event.buttons() & Qt.MouseButton.LeftButton):
             super().mouseMoveEvent(event)
             return
@@ -443,11 +733,16 @@ class PageCanvas(QGraphicsView):
         if pages is None:
             self._text_indices.clear()
             self._links.clear()
+            self._annotations.clear()
             self.clear_selection()
+            self.clear_annotation_selection()
         else:
             for page in pages:
                 self._text_indices.pop(page, None)
                 self._links.pop(page, None)
+                self._annotations.pop(page, None)
+            if self._picked is not None and self._picked[0] in pages:
+                self.clear_annotation_selection()
             # A selection on an edited page refers to text that may no
             # longer exist at those indices, so it is dropped too.
             if self._selection_page in pages:
@@ -631,7 +926,9 @@ class PageCanvas(QGraphicsView):
             if self._pending.get(page) == (width, height):
                 continue
             self._pending[page] = (width, height)
-            self._ensure_renderer().requestPage(page - 1, QSize(width, height))
+            self._ensure_renderer().requestPage(
+                page - 1, QSize(width, height), annotation_render_options()
+            )
 
     def _ensure_renderer(self) -> QPdfPageRenderer:
         if self._renderer is None:

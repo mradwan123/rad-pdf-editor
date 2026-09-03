@@ -75,6 +75,11 @@ def _first_party_plugins() -> list[ToolPlugin]:
     import every op module (and their heavier dependencies like
     reportlab/pikepdf) just to build a `Registry` instance.
     """
+    from core.ops.annotate import (
+        AddAnnotationPlugin,
+        DeleteAnnotationPlugin,
+        EditAnnotationPlugin,
+    )
     from core.ops.convert_from import (
         PdfToDocxPlugin,
         PdfToHtmlPlugin,
@@ -112,6 +117,9 @@ def _first_party_plugins() -> list[ToolPlugin]:
     from core.ops.watermark import WatermarkPlugin
 
     return [
+        AddAnnotationPlugin(),
+        EditAnnotationPlugin(),
+        DeleteAnnotationPlugin(),
         MergePlugin(),
         ExtractPagesPlugin(),
         ReorderPagesPlugin(),

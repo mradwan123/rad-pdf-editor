@@ -2422,3 +2422,125 @@ def test_the_outline_panel_navigates_the_page_view(qapp: QApplication, tmp_path:
 
     assert tab.canvas.current_page == 2
     _force_close(window)
+
+
+def _annotations(tab: DocumentTab) -> list[tuple[str, str]]:
+    import fitz
+
+    with fitz.open(tab.controller.doc.working_path) as doc:
+        return [
+            (a.info.get("id", ""), a.type[1])
+            for page in doc
+            for a in page.annots()
+        ]
+
+
+def test_highlighting_a_text_selection_creates_one_annotation(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Phase 6e. Text markup acts on the selection rather than a dragged
+    rect, and a selection spanning lines stays *one* annotation - so one
+    undo step and one audit entry."""
+    src = _make_searchable_pdf(tmp_path / "src.pdf", 2)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    tab.canvas.select_all_on_page(1)
+
+    window._markup_selection("highlight")
+
+    annots = _annotations(tab)
+    assert len(annots) == 1
+    assert annots[0][1] == "Highlight"
+    assert tab.controller.can_undo
+    _force_close(window)
+
+
+def test_markup_without_a_selection_reports_an_error(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_searchable_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    tab.canvas.clear_selection()
+
+    with patch("gui.main_window.QMessageBox.critical") as critical:
+        window._markup_selection("highlight")
+
+    assert critical.called
+    assert _annotations(tab) == []
+    _force_close(window)
+
+
+def test_a_drawn_shape_becomes_an_annotation_operation(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_searchable_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+
+    tab.canvas.annotation_drawn.emit(1, "rect", (50.0, 100.0, 200.0, 200.0))
+
+    annots = _annotations(tab)
+    assert len(annots) == 1
+    assert annots[0][1] == "Square"
+    _force_close(window)
+
+
+def test_an_annotation_can_be_moved_and_deleted_after_the_fact(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Decision 9: annotations stay editable. Identity is the /NM uuid,
+    which survives the new working file every operation writes."""
+    src = _make_searchable_pdf(tmp_path / "src.pdf", 1)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    tab.canvas.annotation_drawn.emit(1, "rect", (50.0, 100.0, 200.0, 200.0))
+    annot_id = _annotations(tab)[0][0]
+    assert annot_id
+
+    tab.canvas.annotation_moved.emit(1, annot_id, (120.0, 300.0, 270.0, 400.0))
+    assert [a[0] for a in _annotations(tab)] == [annot_id], "same annotation, moved"
+
+    window._apply_to_tab(tab, "delete_annotation", page=1, annot_id=annot_id)
+    assert _annotations(tab) == []
+
+    window._undo()
+    assert [a[0] for a in _annotations(tab)] == [annot_id], "undo restores it by id"
+    _force_close(window)
+
+
+def test_a_tool_dialog_prefills_the_selected_pages(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Phase 6e: selecting pages in the sidebar and then opening a tool
+    no longer means retyping those page numbers."""
+    from gui.dialogs.rotate_dialog import RotateDialog
+
+    src = _make_pdf(tmp_path / "src.pdf", 6)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    for row in (1, 3, 4):
+        tab.thumbnail_list.item(row).setSelected(True)
+
+    captured: list[str] = []
+
+    def fake_exec(dialog: RotateDialog) -> int:
+        captured.append(dialog.pages.text())
+        return QDialog.DialogCode.Rejected
+
+    with patch.object(RotateDialog, "exec", fake_exec):
+        window._run_tool("rotate_pages", RotateDialog)
+
+    assert captured == ["2,4,5"]
+    _force_close(window)
+
+
+def test_prefill_does_not_overwrite_a_value_the_dialog_already_has(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from gui.dialogs.rotate_dialog import RotateDialog
+
+    dialog = RotateDialog()
+    dialog.pages.setText("9")
+    dialog.set_page_selection([1, 2])
+    assert dialog.pages.text() == "9"

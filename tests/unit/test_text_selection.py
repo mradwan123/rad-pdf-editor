@@ -164,6 +164,19 @@ def _drag_to(canvas: PageCanvas, pos: QPoint) -> None:
     )
 
 
+def _release(canvas: PageCanvas, pos: QPoint) -> None:
+    canvas.mouseReleaseEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonRelease,
+            QPointF(pos),
+            QPointF(pos),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+
+
 def test_dragging_selects_exactly_the_text_under_the_drag(canvas: PageCanvas) -> None:
     """Real drag gestures are not reliably simulatable under
     QT_QPA_PLATFORM=offscreen, so the handlers are driven with real
@@ -261,3 +274,98 @@ def test_clicking_an_external_link_reports_its_url_and_no_page(
 def test_clicking_a_link_does_not_start_a_selection(canvas: PageCanvas) -> None:
     _press(canvas, _viewport_point(canvas, 1, 100, 295))
     assert canvas.selected_text == ""
+
+
+# --- Phase 6e: canvas annotation tools -------------------------------------
+
+
+def test_switching_to_a_draw_tool_clears_the_text_selection(canvas: PageCanvas) -> None:
+    canvas.select_all_on_page(1)
+    assert canvas.selected_text
+
+    canvas.set_tool("rect")
+
+    assert canvas.tool == "rect"
+    assert canvas.selected_text == ""
+
+
+def test_an_unknown_tool_is_rejected(canvas: PageCanvas) -> None:
+    with pytest.raises(ValueError, match="Unknown canvas tool"):
+        canvas.set_tool("sparkle")
+
+
+def test_dragging_a_shape_emits_a_bottom_left_origin_rect(canvas: PageCanvas) -> None:
+    """Operations in this codebase take bottom-left-origin points; the
+    canvas works in top-left. The flip happens once, here."""
+    drawn: list[tuple[int, str, object]] = []
+    canvas.annotation_drawn.connect(lambda page, kind, payload: drawn.append((page, kind, payload)))
+    canvas.set_tool("rect")
+
+    _press(canvas, _viewport_point(canvas, 1, 60, 100))
+    _drag_to(canvas, _viewport_point(canvas, 1, 200, 180))
+    _release(canvas, _viewport_point(canvas, 1, 200, 180))
+
+    assert len(drawn) == 1
+    page, kind, rect = drawn[0]
+    assert (page, kind) == (1, "rect")
+    x0, y0, x1, y1 = rect  # type: ignore[misc]
+    assert (x0, x1) == pytest.approx((60, 200), abs=1)
+    # Top-left y=100..180 on a 600pt page -> bottom-left y=420..500.
+    assert (y0, y1) == pytest.approx((PAGE_H - 180, PAGE_H - 100), abs=1)
+
+
+def test_a_stray_click_does_not_create_a_shape(canvas: PageCanvas) -> None:
+    drawn: list[object] = []
+    canvas.annotation_drawn.connect(lambda *a: drawn.append(a))
+    canvas.set_tool("rect")
+
+    _press(canvas, _viewport_point(canvas, 1, 60, 100))
+    _release(canvas, _viewport_point(canvas, 1, 61, 101))
+
+    assert drawn == [], "a 1pt drag is a click, not a shape"
+
+
+def test_ink_collects_the_stroke(canvas: PageCanvas) -> None:
+    drawn: list[tuple[int, str, object]] = []
+    canvas.annotation_drawn.connect(lambda page, kind, payload: drawn.append((page, kind, payload)))
+    canvas.set_tool("ink")
+
+    _press(canvas, _viewport_point(canvas, 1, 60, 300))
+    _drag_to(canvas, _viewport_point(canvas, 1, 100, 330))
+    _drag_to(canvas, _viewport_point(canvas, 1, 140, 300))
+    _release(canvas, _viewport_point(canvas, 1, 140, 300))
+
+    assert len(drawn) == 1
+    _page, kind, strokes = drawn[0]
+    assert kind == "ink"
+    assert len(strokes) == 1  # type: ignore[arg-type]
+    assert len(strokes[0]) >= 3  # type: ignore[index]
+
+
+def test_a_note_commits_on_click_without_a_drag(canvas: PageCanvas) -> None:
+    drawn: list[tuple[int, str, object]] = []
+    canvas.annotation_drawn.connect(lambda page, kind, payload: drawn.append((page, kind, payload)))
+    canvas.set_tool("note")
+
+    _press(canvas, _viewport_point(canvas, 1, 300, 400))
+
+    assert len(drawn) == 1
+    assert drawn[0][1] == "note"
+
+
+def test_markup_rects_come_back_bottom_left_origin(canvas: PageCanvas) -> None:
+    canvas.select_all_on_page(1)
+    page, rects = canvas.selection_markup_rects()
+
+    assert page == 1
+    assert rects
+    for x0, y0, x1, y1 in rects:
+        assert x1 > x0 and y1 > y0
+        # Line one sits near the top of the page, so in bottom-left
+        # coordinates it has a *high* y.
+        assert 0 < y0 < PAGE_H
+
+
+def test_markup_rects_are_empty_without_a_selection(canvas: PageCanvas) -> None:
+    canvas.clear_selection()
+    assert canvas.selection_markup_rects() == (0, [])

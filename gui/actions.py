@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import QToolBar
 
 from gui.dialogs.tool_dialog_registry import TOOL_DIALOGS
@@ -35,6 +35,7 @@ def build_actions(window: MainWindow) -> None:
     _build_file_menu(window)
     _build_edit_menu(window)
     _build_tools_menu(window)
+    _build_annotate_menu(window)
     _build_workflows_menu(window)
     _build_toolbar(window)
     build_view_menu(window)
@@ -181,6 +182,58 @@ def _build_tools_menu(window: MainWindow) -> None:
     if categorized_tool_ids != set(TOOL_DIALOGS):
         missing = sorted(set(TOOL_DIALOGS) - categorized_tool_ids)
         raise ValueError(f"Tools menu categories missing tool_id(s): {missing}")
+
+
+#: (action attribute, label, annotation kind). Text markup acts on the
+#: current text selection rather than a dragged rect - the familiar
+#: gesture, and a reuse of 6c's selection machinery.
+_MARKUP_TOOLS = [
+    ("highlight_action", "&Highlight", "highlight"),
+    ("underline_action", "&Underline", "underline"),
+    ("strikeout_action", "&Strikeout", "strikeout"),
+    ("squiggly_action", "S&quiggly", "squiggly"),
+]
+
+#: (action attribute, label, canvas tool). These are drawn on the page.
+_DRAW_TOOLS = [
+    ("select_tool_action", "&Select Text", "select"),
+    ("rect_tool_action", "&Rectangle", "rect"),
+    ("circle_tool_action", "&Ellipse", "circle"),
+    ("line_tool_action", "&Line", "line"),
+    ("ink_tool_action", "&Freehand", "ink"),
+    ("note_tool_action", "Sticky &Note", "note"),
+]
+
+
+def _build_annotate_menu(window: MainWindow) -> None:
+    menu = window.menuBar().addMenu(window.tr("&Annotate"))
+
+    for attribute, label, kind in _MARKUP_TOOLS:
+        action = QAction(window.tr(label), window)
+        action.triggered.connect(window._make_markup_handler(kind))
+        setattr(window, attribute, action)
+        menu.addAction(action)
+        window.markup_actions[kind] = action
+
+    menu.addSeparator()
+
+    # Exactly one draw tool is active at a time.
+    window.tool_group = QActionGroup(window)
+    window.tool_group.setExclusive(True)
+    for attribute, label, tool in _DRAW_TOOLS:
+        action = QAction(window.tr(label), window)
+        action.setCheckable(True)
+        action.setChecked(tool == "select")
+        action.triggered.connect(window._make_canvas_tool_handler(tool))
+        window.tool_group.addAction(action)
+        setattr(window, attribute, action)
+        menu.addAction(action)
+        window.canvas_tool_actions[tool] = action
+
+    menu.addSeparator()
+    window.delete_annotation_action = QAction(window.tr("&Delete Annotation"), window)
+    window.delete_annotation_action.triggered.connect(window._delete_annotation_under_cursor)
+    menu.addAction(window.delete_annotation_action)
 
 
 def _build_workflows_menu(window: MainWindow) -> None:

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -107,6 +107,8 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
     find_action: QAction
     copy_action: QAction
     select_all_action: QAction
+    delete_annotation_action: QAction
+    tool_group: QActionGroup
     build_workflow_action: QAction
     run_workflow_action: QAction
     zoom_in_action: QAction
@@ -160,6 +162,8 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
         self.setCentralWidget(self.stack)
 
         self.tool_actions: dict[str, QAction] = {}
+        self.markup_actions: dict[str, QAction] = {}
+        self.canvas_tool_actions: dict[str, QAction] = {}
         build_actions(self)
         self._refresh()
 
