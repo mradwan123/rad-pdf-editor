@@ -44,7 +44,8 @@ from core.document_info import DocumentInfo, read_document_info
 from core.errors import OperationError, PDFEditorError
 from core.logging_config import get_logger
 from core.model.document import DocumentSession
-from core.ops.common import EXTERNAL_SOURCE_TOOL_IDS
+from core.model.operation import Operation
+from core.ops.common import CONVERTIBLE_OPEN_EXTENSIONS, EXTERNAL_SOURCE_TOOL_IDS
 from core.ops.forms import list_form_field_names
 from core.registry.registry import Registry, discover_and_load
 from core.session.audit_log import AuditLog
@@ -701,9 +702,17 @@ class MainWindow(QMainWindow):
     def _open_document(self) -> None:
         path_str, _selected_filter = QFileDialog.getOpenFileName(
             self,
-            self.tr("Open PDF"),
+            self.tr("Open"),
             "",
-            self.tr("PDF files (*.pdf)"),
+            self.tr(
+                "All supported files (*.pdf *.docx *.pptx *.xlsx *.html *.htm *.jpg *.jpeg *.png);;"
+                "PDF files (*.pdf);;"
+                "Word documents (*.docx);;"
+                "PowerPoint presentations (*.pptx);;"
+                "Excel workbooks (*.xlsx);;"
+                "HTML files (*.html *.htm);;"
+                "Images (*.jpg *.jpeg *.png)"
+            ),
             options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not path_str:
@@ -720,6 +729,14 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         return dialog.placement
+
+    def _build_open_conversion_operation(self, tool_id: str, path: Path) -> Operation:
+        """The Operation `_open_document_path` runs for a non-PDF file
+        - see CONVERTIBLE_OPEN_EXTENSIONS. jpg_to_pdf takes `sources`
+        (plural, shared with its Tools-menu combine-several-images
+        form) rather than the `source_path` the other four take."""
+        kwargs = {"sources": [path]} if tool_id == "jpg_to_pdf" else {"source_path": path}
+        return self.registry.get(tool_id).build_operation(**kwargs)
 
     def _open_document_path(self, path: Path, placement: str | None = None) -> None:
         """Shared by the Open dialog and the Recent Files menu. Asks
@@ -743,8 +760,17 @@ class MainWindow(QMainWindow):
             tab = self._add_tab(activate=False)
             opened_new_tab = True
 
+        # A Word/PowerPoint/Excel/HTML/image file is converted to a
+        # PDF first - see AppController.open_document_via_conversion
+        # for why it can't just be copied in like a PDF can.
+        tool_id = CONVERTIBLE_OPEN_EXTENSIONS.get(path.suffix.lower())
         try:
-            tab.controller.open_document(path)
+            with self._busy_cursor():
+                if tool_id is not None:
+                    operation = self._build_open_conversion_operation(tool_id, path)
+                    tab.controller.open_document_via_conversion(path, operation)
+                else:
+                    tab.controller.open_document(path)
         except PDFEditorError as exc:
             # A recent-file entry that fails to open (moved/deleted
             # since last time) is stale - drop it so it doesn't keep

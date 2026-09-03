@@ -43,6 +43,26 @@ EXTERNAL_SOURCE_TOOL_IDS = frozenset(
     }
 )
 
+#: Extension -> tool_id, for files File > Open can bring in by running
+#: them through the matching external-source conversion above first,
+#: rather than trying to open them as a PDF directly - every editing
+#: Operation, and the QtPdf/fitz thumbnail renderer, assume the
+#: working file already is one. jpg_to_pdf takes `sources` (a list,
+#: shared with its Tools-menu "combine several images" form) rather
+#: than the singular `source_path` the other four take - a caller
+#: building its kwargs from a single opened path needs to wrap it in a
+#: one-element list.
+CONVERTIBLE_OPEN_EXTENSIONS: dict[str, str] = {
+    ".docx": "docx_to_pdf",
+    ".pptx": "pptx_to_pdf",
+    ".xlsx": "xlsx_to_pdf",
+    ".html": "html_to_pdf",
+    ".htm": "html_to_pdf",
+    ".jpg": "jpg_to_pdf",
+    ".jpeg": "jpg_to_pdf",
+    ".png": "jpg_to_pdf",
+}
+
 
 def open_pdf(path: Path) -> pikepdf.Pdf:
     """Open `path` with pikepdf, translating library/OS errors into the
