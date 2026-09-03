@@ -2534,3 +2534,68 @@ canvas's `DRAW_TOOLS` because the *gesture* is the same as drawing a
 shape, but the handler tells them apart: a redact drag prompts first,
 since unlike an annotation it cannot be recovered from the saved file -
 only undone from the session snapshot.
+
+### 6g — the design system (done)
+
+**Icons, at last.** `gui/icons.py` draws 20 glyphs with `QPainter`, the
+same technique `gui/resources.py` already used for the app mark. Before
+this the app had **no iconography at all** - the toolbar was four text
+labels. Drawing rather than shipping means no binary assets, nothing
+for PyInstaller to bundle, and - the reason it matters here - icons
+that re-theme by being *redrawn* rather than needing a second set of
+files. The toolbar is now grouped by what the user is doing (file,
+undo, zoom, find, annotate, panels) rather than by which menu an action
+came from.
+
+**The History panel** (`gui/history_panel.py`) makes the undo stack
+visible for the first time. Every `Operation` has had `describe()`
+since Phase 0 - it feeds the audit log - and the GUI showed none of it.
+Clicking an entry steps undo/redo *to* that point one operation at a
+time rather than jumping: `DocumentSession` has no notion of a history
+position, and inventing one here would put a second idea of "current
+state" beside the one it already owns.
+
+**Light theme, derived rather than duplicated.** The palette is one
+table with two columns, so a role cannot be themed in dark and
+forgotten in light. `styles.qss` was the harder half: 31 hardcoded
+colours, and a palette swap alone left a light palette under a dark
+stylesheet - visibly broken. `build_stylesheet()` mirrors each colour's
+*lightness* while keeping hue and saturation, which is a mechanical
+transformation with nothing to keep in sync. **This works because the
+design is greyscale**; a saturated brand colour would invert into
+something unintended and would need naming explicitly. Also caught by
+looking: `PageCanvas` hardcoded its background, so the viewer stayed
+dark while every other surface switched - it now takes a shade off
+`Window` and re-applies on `QEvent.Type.PaletteChange`.
+
+**Command palette** (`gui/dialogs/command_palette.py`, Ctrl+Shift+P)
+over all 52 commands. A plain `QDialog` subclass, not a `QMenu` - a
+testing constraint as much as a design one, since `QMenu.exec` is a
+compiled method `patch.object` silently fails to intercept. Matching
+requires *every* whitespace-separated term rather than fuzzy
+subsequence, which with 40 similarly-named tools returns almost
+everything for a short query. A tool's `tool_id` is searchable but not
+shown: display names are written for users ("Word to PDF" contains no
+"conv" and no "docx"), and the id is often what someone
+half-remembers - `"conv pdf"` found nothing until the ids were indexed.
+
+**UI and session state** (`core/session/ui_state.py`) is Qt-free JSON
+under `app_data_dir()`, matching `recent_files.py` rather than using
+`QSettings` (which writes to the real per-OS location even under
+tests). Reopening documents is the privacy tradeoff decision 13 chose,
+so it is governed by a `reopen_documents` preference and a
+clear-session action; restored documents reopen from their **original
+paths** through the normal open flow - session temp dirs are never
+resurrected. A corrupt file, an unknown version or an unknown key all
+mean "no saved state", never a crash.
+
+Two Qt notes worth keeping:
+- State is captured in `closeEvent` **before** `_close_all_tabs()`;
+  closing first clears the document identity and would record an empty
+  list every time. The tests' `_force_close` helper closes sessions
+  first, so a test of this must call `window.close()` directly.
+- `_refresh` keys the history update off
+  `toggle_history_action.isChecked()`, not `history_dock.isVisible()`:
+  a child of a never-shown window always reports invisible, so
+  visibility meant the panel never populated under test - and the
+  action is the user's intent anyway. Same trap as the find bar.

@@ -30,7 +30,9 @@ from typing import Any
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
+    QDockWidget,
     QFileDialog,
     QLabel,
     QListWidget,
@@ -54,15 +56,20 @@ from core.session.autosave import (
     recover_active_session,
 )
 from core.session.recent_files import RecentFiles
-from gui.actions import build_actions
+from core.session.ui_state import UiState, load_ui_state, save_ui_state
+from gui.actions import apply_action_icons, build_actions
 from gui.controller import AppController
+from gui.dialogs.command_palette import Command, CommandPalette
 from gui.dialogs.tab_placement_dialog import (
     PLACEMENT_NEW_TAB,
     PLACEMENT_REPLACE_CURRENT,
     TabPlacementDialog,
 )
 from gui.document_tab import DocumentTab
+from gui.history_panel import HistoryPanel
+from gui.palette import build_palette, build_stylesheet
 from gui.resources import build_logo_pixmap
+from gui.styles import load_stylesheet
 from gui.tab_manager import TabManagementMixin
 from gui.tool_runner import ToolRunnerMixin
 
@@ -108,6 +115,23 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
     copy_action: QAction
     select_all_action: QAction
     delete_annotation_action: QAction
+    # Built by _build_annotate_menu via setattr(), so mypy cannot infer
+    # them from an assignment - declared here for the same reason as the
+    # rest (see the note above).
+    highlight_action: QAction
+    underline_action: QAction
+    strikeout_action: QAction
+    squiggly_action: QAction
+    select_tool_action: QAction
+    rect_tool_action: QAction
+    circle_tool_action: QAction
+    line_tool_action: QAction
+    ink_tool_action: QAction
+    note_tool_action: QAction
+    redact_tool_action: QAction
+    toggle_history_action: QAction
+    toggle_theme_action: QAction
+    command_palette_action: QAction
     tool_group: QActionGroup
     build_workflow_action: QAction
     run_workflow_action: QAction
@@ -160,6 +184,19 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
         self.stack.addWidget(self.empty_state)
         self.stack.addWidget(self.tab_widget)
         self.setCentralWidget(self.stack)
+
+        self.ui_state = load_ui_state()
+        self.theme = self.ui_state.theme
+
+        # The undo stack has been describable since Phase 0 and invisible
+        # ever since; this is the first time it is shown.
+        self.history_panel = HistoryPanel()
+        self.history_panel.step_requested.connect(self._step_history)
+        self.history_dock = QDockWidget(self.tr("History"), self)
+        self.history_dock.setObjectName("historyDock")
+        self.history_dock.setWidget(self.history_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.history_dock)
+        self.history_dock.setVisible(False)
 
         self.tool_actions: dict[str, QAction] = {}
         self.markup_actions: dict[str, QAction] = {}
@@ -313,6 +350,133 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
             tab.canvas.scroll_to_page(page)
         elif url:
             self.statusBar().showMessage(self.tr("Link: {0}").format(url), 8000)
+
+    def _toggle_history(self, checked: bool) -> None:
+        self.history_dock.setVisible(checked)
+        if checked:
+            self._refresh_history()
+
+    def _refresh_history(self) -> None:
+        tab = self.current_tab
+        if tab is None:
+            self.history_panel.update_history([], [])
+            return
+        doc = tab.controller.doc
+        self.history_panel.update_history(
+            [operation.describe() for operation in doc.operation_log],
+            # redo_stack is newest-first (undo appends), so it is
+            # reversed to read in the order redo would replay it.
+            [operation.describe() for operation in reversed(doc.redo_stack)],
+        )
+
+    def _step_history(self, steps: int) -> None:
+        """Undo or redo `steps` places, one operation at a time.
+
+        Stepping rather than jumping: DocumentSession has no notion of a
+        history position, and inventing one here would put a second idea
+        of "current state" next to the one it already owns.
+        """
+        for _ in range(abs(steps)):
+            if steps < 0:
+                self._undo()
+            else:
+                self._redo()
+
+    def _toggle_theme(self) -> None:
+        self.apply_theme("light" if self.theme == "dark" else "dark")
+
+    def apply_theme(self, theme: str) -> None:
+        """Repaint the whole app in `theme`. The icons are drawn rather
+        than loaded, so they re-theme by being redrawn."""
+        self.theme = theme
+        application = QApplication.instance()
+        if isinstance(application, QApplication):
+            application.setPalette(build_palette(theme))
+            # The palette alone is not the theme: styles.qss paints most
+            # of the chrome and is authored dark, so switching without
+            # this leaves a light palette under a dark stylesheet.
+            application.setStyleSheet(build_stylesheet(load_stylesheet(), theme))
+        apply_action_icons(self)
+        self.toggle_theme_action.setText(
+            self.tr("Switch to &Dark Theme")
+            if theme == "light"
+            else self.tr("Switch to &Light Theme")
+        )
+
+    def _show_command_palette(self) -> None:
+        palette = CommandPalette(self._build_commands(), self)
+        if palette.exec() == QDialog.DialogCode.Accepted and palette.chosen is not None:
+            palette.chosen.run()
+
+    def _build_commands(self) -> list[Command]:
+        """Every launchable action, flattened for search."""
+        commands: list[Command] = []
+        for tool_id, action in self.tool_actions.items():
+            plugin = self.registry.get(tool_id)
+            commands.append(
+                Command(plugin.display_name, self.tr("Tool"), action.trigger, tool_id)
+            )
+        for kind, action in self.markup_actions.items():
+            commands.append(Command(kind.title(), self.tr("Annotate"), action.trigger))
+        for name, action in (
+            (self.tr("Open"), self.open_action),
+            (self.tr("Save As"), self.save_as_action),
+            (self.tr("Undo"), self.undo_action),
+            (self.tr("Redo"), self.redo_action),
+            (self.tr("Find"), self.find_action),
+            (self.tr("Fit Width"), self.fit_width_action),
+            (self.tr("Fit Page"), self.fit_page_action),
+            (self.tr("Show History"), self.toggle_history_action),
+            (self.tr("Switch Theme"), self.toggle_theme_action),
+            (self.tr("Build Workflow"), self.build_workflow_action),
+            (self.tr("Run Workflow"), self.run_workflow_action),
+        ):
+            commands.append(Command(name, self.tr("Command"), action.trigger))
+        return commands
+
+    def _capture_ui_state(self) -> UiState:
+        state = self.ui_state
+        state.theme = self.theme
+        state.window_width = self.width()
+        state.window_height = self.height()
+        state.show_toolbar = self.toolbar.isVisible()
+        state.show_statusbar = self.statusBar().isVisible()
+        state.show_history = self.history_dock.isVisible()
+        state.thumbnail_width = self.thumbnail_size.width()
+        tab = self.current_tab
+        if tab is not None:
+            state.zoom = tab.canvas.zoom
+        state.open_documents = [
+            str(t.controller.doc.source_path)
+            for t in self.tabs()
+            if t.controller.doc.source_path is not None
+        ]
+        return state
+
+    def restore_ui_state(self) -> None:
+        """Apply the saved layout, and reopen documents if allowed.
+
+        Called from gui/main.py after the window is shown, for the same
+        reason restore_autosaved_session is: a constructor that can
+        block or open files is both bad practice and untestable.
+        """
+        state = self.ui_state
+        if state.window_width > 0 and state.window_height > 0:
+            self.resize(state.window_width, state.window_height)
+        self.toggle_toolbar_action.setChecked(state.show_toolbar)
+        self.toggle_statusbar_action.setChecked(state.show_statusbar)
+        self.toggle_history_action.setChecked(state.show_history)
+        if state.thumbnail_width > 0:
+            self._set_thumbnail_zoom(state.thumbnail_width)
+        if not state.reopen_documents:
+            return
+        for path_str in state.open_documents:
+            path = Path(path_str)
+            if path.exists():
+                self._open_document_path(path, PLACEMENT_NEW_TAB)
+        if state.zoom > 0:
+            for tab in self.tabs():
+                tab.canvas.set_zoom(state.zoom)
 
     def _toggle_sidebar(self, checked: bool) -> None:
         for tab in self.tabs():
@@ -483,9 +647,13 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
         # before it's asked about, so "this document" is unambiguous),
         # and Cancel on any single one aborts the whole window close,
         # leaving the tabs that hadn't been reached yet untouched.
+        self._captured_state = self._capture_ui_state()
         if not self._close_all_tabs():
             event.ignore()
             return
+        # Captured *before* the tabs are gone - closing them first
+        # would record an empty document list every time.
+        save_ui_state(self._captured_state)
         # A clean shutdown leaves nothing to recover - drop the pointer
         # so the next launch doesn't offer a stale session.
         mark_active_session(None)
@@ -607,6 +775,12 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
             self.stack.setCurrentWidget(self.empty_state)
         self._update_tab_labels()
         self._update_action_state()
+        # The action's checked state, not history_dock.isVisible(): a
+        # child widget of a window that has never been shown always
+        # reports invisible, so visibility would mean the panel never
+        # populated under test - and it is the user's intent anyway.
+        if self.toggle_history_action.isChecked():
+            self._refresh_history()
 
     def _render_tab(self, tab: DocumentTab) -> None:
         working_path = tab.controller.doc.working_path

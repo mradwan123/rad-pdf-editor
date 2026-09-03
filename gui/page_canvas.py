@@ -33,6 +33,7 @@ import fitz
 from PySide6.QtCore import (
     QCoreApplication,
     QDeadlineTimer,
+    QEvent,
     QModelIndex,
     QPointF,
     QRectF,
@@ -47,6 +48,7 @@ from PySide6.QtGui import (
     QImage,
     QMouseEvent,
     QPainter,
+    QPalette,
     QPen,
     QPixmap,
     QResizeEvent,
@@ -236,7 +238,7 @@ class PageCanvas(QGraphicsView):
         self.setScene(self._scene)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-        self.setBackgroundBrush(QColor(35, 36, 38))
+        self._apply_palette_background()
         self.setAccessibleName(self.tr("Page view"))
         # NoDrag: the left button selects text. Scrolling is the wheel
         # and the scrollbars, as in every PDF reader's select mode.
@@ -281,6 +283,24 @@ class PageCanvas(QGraphicsView):
 
         bar = self.verticalScrollBar()
         bar.valueChanged.connect(lambda _v: self._on_view_changed())
+
+    def _apply_palette_background(self) -> None:
+        """The surround behind the pages, taken from the palette.
+
+        Hardcoding it left the viewer dark under the light theme while
+        every other surface switched - the one obviously wrong pane.
+        A shade off Window separates the paper from the chrome in both
+        themes without needing a second colour table.
+        """
+        window = self.palette().color(QPalette.ColorRole.Window)
+        self.setBackgroundBrush(
+            window.darker(115) if window.lightnessF() > 0.5 else window.lighter(115)
+        )
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.PaletteChange:
+            self._apply_palette_background()
 
     # --- document ---------------------------------------------------------
 

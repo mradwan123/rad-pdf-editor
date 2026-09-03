@@ -18,7 +18,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pikepdf
 import pytest
 from PySide6.QtCore import QModelIndex, QPoint, QSize, Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox
 
@@ -2634,3 +2634,174 @@ def test_the_redact_dialog_works_without_a_document(qapp: QApplication) -> None:
     values = dialog.values()
     assert values["search_text"] == "secret"
     assert values["rects"] == []
+
+
+def test_the_toolbar_has_icons_now(qapp: QApplication, tmp_path: Path) -> None:
+    """Phase 6g. Before this the toolbar was four text labels and the
+    app had no iconography at all."""
+    window = MainWindow()
+    actions = [a for a in window.toolbar.actions() if not a.isSeparator()]
+
+    assert len(actions) >= 12
+    assert all(not a.icon().isNull() for a in actions), "every toolbar action needs an icon"
+    window.close()
+
+
+def test_switching_theme_repaints_palette_icons_and_stylesheet(
+    qapp: QApplication,
+) -> None:
+    """A palette swap alone is not a theme: styles.qss paints most of
+    the chrome and is authored dark."""
+    window = MainWindow()
+    window.apply_theme("dark")
+    dark_sheet = qapp.styleSheet()
+
+    window.apply_theme("light")
+
+    assert window.theme == "light"
+    assert qapp.palette().color(QPalette.ColorRole.Window).lightnessF() > 0.8
+    assert qapp.styleSheet() != dark_sheet, "the stylesheet must switch too"
+    assert "Dark" in window.toggle_theme_action.text()
+    window.apply_theme("dark")
+    window.close()
+
+
+def test_the_history_panel_shows_the_undo_stack(qapp: QApplication, tmp_path: Path) -> None:
+    """Every Operation has described itself since Phase 0; until 6g the
+    GUI showed none of it."""
+    src = _make_pdf(tmp_path / "src.pdf", 3)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    window.toggle_history_action.setChecked(True)
+
+    window._apply_to_tab(tab, "rotate_pages", angle=90, pages=[1])
+
+    assert window.history_panel.list.count() == 1
+    assert "Rotated" in window.history_panel.list.item(0).text()
+
+    window._undo()
+
+    # Still listed, now as redoable rather than applied.
+    assert window.history_panel.list.count() == 1
+    _force_close(window)
+
+
+def test_history_stepping_undoes_and_redoes(qapp: QApplication, tmp_path: Path) -> None:
+    src = _make_pdf(tmp_path / "src.pdf", 3)
+    window = MainWindow()
+    tab = _open_tab(window, src)
+    window._apply_to_tab(tab, "rotate_pages", angle=90, pages=[1])
+    window._apply_to_tab(tab, "rotate_pages", angle=90, pages=[2])
+    assert len(tab.controller.doc.operation_log) == 2
+
+    window._step_history(-2)
+    assert len(tab.controller.doc.operation_log) == 0
+
+    window._step_history(2)
+    assert len(tab.controller.doc.operation_log) == 2
+    _force_close(window)
+
+
+def test_the_command_palette_lists_and_runs_commands(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """A plain QDialog subclass, not a QMenu - which is what makes it
+    testable at all headlessly (CLAUDE.md documents the QMenu.exec
+    patching trap)."""
+    from gui.dialogs.command_palette import CommandPalette
+
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    window = MainWindow()
+    _open_tab(window, src)
+    commands = window._build_commands()
+
+    assert len(commands) > 40
+    palette = CommandPalette(commands, window)
+    palette.search.setText("rotate")
+    assert palette.list.count() >= 1
+
+    ran: list[str] = []
+    chosen = palette.list.item(0).data(Qt.ItemDataRole.UserRole)
+    chosen.run = lambda: ran.append("ran")
+    palette.list.setCurrentRow(0)
+    palette._accept_current()
+
+    assert palette.chosen is chosen
+    palette.chosen.run()
+    assert ran == ["ran"]
+    _force_close(window)
+
+
+def test_ui_state_is_captured_on_close(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Captured before the tabs are closed - closing first would record
+    an empty document list every time."""
+    from core.session.ui_state import load_ui_state
+
+    monkeypatch.setenv("PDFEDITOR_APP_DATA_DIR", str(tmp_path / "appdata"))
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    window = MainWindow()
+    _open_tab(window, src)
+    window.apply_theme("light")
+
+    # window.close() directly, not _force_close: the helper closes each
+    # tab's session first, which clears the document identity that
+    # closeEvent is supposed to capture. Nothing is dirty here, so the
+    # real close path runs without a prompt.
+    window.close()
+
+    state = load_ui_state()
+    assert state.theme == "light"
+    assert state.open_documents == [str(src)]
+    MainWindow().apply_theme("dark")
+
+
+def test_reopening_documents_can_be_switched_off(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The privacy switch: launching in a meeting room should not
+    redisplay whatever was last open."""
+    from core.session.ui_state import UiState, save_ui_state
+
+    monkeypatch.setenv("PDFEDITOR_APP_DATA_DIR", str(tmp_path / "appdata"))
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    save_ui_state(UiState(open_documents=[str(src)], reopen_documents=False))
+
+    window = MainWindow()
+    window.restore_ui_state()
+
+    assert window.tab_widget.count() == 0
+    window.close()
+
+
+def test_reopening_documents_when_allowed(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from core.session.ui_state import UiState, save_ui_state
+
+    monkeypatch.setenv("PDFEDITOR_APP_DATA_DIR", str(tmp_path / "appdata"))
+    src = _make_pdf(tmp_path / "src.pdf", 2)
+    save_ui_state(UiState(open_documents=[str(src)], reopen_documents=True))
+
+    window = MainWindow()
+    window.restore_ui_state()
+
+    assert window.tab_widget.count() == 1
+    _force_close(window)
+
+
+def test_a_missing_document_is_skipped_on_restore(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file moved or deleted since last run must not block startup."""
+    from core.session.ui_state import UiState, save_ui_state
+
+    monkeypatch.setenv("PDFEDITOR_APP_DATA_DIR", str(tmp_path / "appdata"))
+    save_ui_state(UiState(open_documents=[str(tmp_path / "gone.pdf")]))
+
+    window = MainWindow()
+    window.restore_ui_state()
+
+    assert window.tab_widget.count() == 0
+    window.close()

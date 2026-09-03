@@ -436,7 +436,7 @@ pytest — before the next begins.
 | **6d** | ✅ **Done.** Background execution with progress and cancel (§3.5). Applied operations run on a QThreadPool worker behind a window-modal, cancellable dialog; page-looping operations report real progress via the opt-in `SupportsProgress` mixin, everything else is indeterminate. |
 | **6e** | ✅ **Done** (markup half). `core/ops/annotate.py` with Add/Edit/Delete annotation operations, `/NM` identity, canvas draw tools, markup driven from the text selection, a re-editable annotation layer (pick, move, delete) and selection-aware dialogs. Insert-content ops (text box, image) deferred to 6e-2. |
 | **6f** | ✅ **Done.** Redaction: dragged region, document-wide search-and-redact, and the metadata/XMP/bookmark/attachment scrub with its review step (§3.7). Verified against **raw file bytes**, not extracted text - a plain save leaves the redacted string recoverable in the file. |
-| **6g** | Design system: icons, toolbar, panels, notifications, light/dark, command palette (§3.6); session restore and its preference (§3.7). |
+| **6g** | ✅ **Done.** Hand-drawn `QPainter` icon set, a grouped toolbar, the History panel, a light theme derived from the dark stylesheet by lightness inversion, a command palette, and UI/session state persistence behind the reopen preference. Inline notifications deferred. |
 | **6h** | Text editing (§5.1), explicitly experimental, with the font-substitution preview of §3.7 gating every commit. |
 
 6a–6d are infrastructure with no new user-facing tools; 6c is the

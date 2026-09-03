@@ -20,10 +20,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPalette
 from PySide6.QtWidgets import QToolBar
 
 from gui.dialogs.tool_dialog_registry import TOOL_DIALOGS
+from gui.icons import build_icon
 
 if TYPE_CHECKING:
     from gui.main_window import MainWindow
@@ -37,8 +39,10 @@ def build_actions(window: MainWindow) -> None:
     _build_tools_menu(window)
     _build_annotate_menu(window)
     _build_workflows_menu(window)
-    _build_toolbar(window)
     build_view_menu(window)
+    # After every action exists: the toolbar draws from all of them.
+    _build_toolbar(window)
+    apply_action_icons(window)
 
 
 def _build_file_menu(window: MainWindow) -> None:
@@ -255,15 +259,64 @@ def _build_workflows_menu(window: MainWindow) -> None:
     workflows_menu.addAction(window.run_workflow_action)
 
 
+#: (action attribute, icon name). Phase 6g - before this the toolbar
+#: was four text labels and the app had no iconography at all.
+_ACTION_ICONS = [
+    ("open_action", "open"),
+    ("save_as_action", "save"),
+    ("undo_action", "undo"),
+    ("redo_action", "redo"),
+    ("zoom_in_action", "zoom_in"),
+    ("zoom_out_action", "zoom_out"),
+    ("fit_width_action", "fit_width"),
+    ("fit_page_action", "fit_page"),
+    ("find_action", "find"),
+    ("select_tool_action", "select"),
+    ("rect_tool_action", "rect"),
+    ("circle_tool_action", "circle"),
+    ("line_tool_action", "line"),
+    ("ink_tool_action", "ink"),
+    ("note_tool_action", "note"),
+    ("redact_tool_action", "redact"),
+    ("highlight_action", "highlight"),
+    ("delete_annotation_action", "delete"),
+    ("toggle_history_action", "history"),
+]
+
+
+def apply_action_icons(window: MainWindow) -> None:
+    """(Re)draw every action's icon in the current palette.
+
+    Called again on a theme change - the icons are painted, not loaded,
+    so re-theming is a redraw rather than a second set of assets.
+    """
+    colour = window.palette().color(QPalette.ColorRole.ButtonText)
+    for attribute, name in _ACTION_ICONS:
+        action = getattr(window, attribute, None)
+        if action is not None:
+            action.setIcon(build_icon(name, colour))
+
+
 def _build_toolbar(window: MainWindow) -> None:
     window.toolbar = QToolBar(window.tr("Main"))
     window.toolbar.setAccessibleName(window.tr("Main toolbar"))
+    window.toolbar.setIconSize(QSize(20, 20))
     window.addToolBar(window.toolbar)
-    window.toolbar.addAction(window.open_action)
-    window.toolbar.addAction(window.save_as_action)
-    window.toolbar.addSeparator()
-    window.toolbar.addAction(window.undo_action)
-    window.toolbar.addAction(window.redo_action)
+    # Grouped by what the user is doing, not by which menu the action
+    # happens to live in.
+    for group in (
+        [window.open_action, window.save_as_action],
+        [window.undo_action, window.redo_action],
+        [window.zoom_out_action, window.zoom_in_action, window.fit_width_action,
+         window.fit_page_action],
+        [window.find_action],
+        [window.select_tool_action, window.highlight_action, window.rect_tool_action,
+         window.ink_tool_action, window.note_tool_action, window.redact_tool_action],
+        [window.toggle_history_action],
+    ):
+        for action in group:
+            window.toolbar.addAction(action)
+        window.toolbar.addSeparator()
 
 
 def build_view_menu(window: MainWindow) -> None:
@@ -329,6 +382,17 @@ def build_view_menu(window: MainWindow) -> None:
     window.toggle_statusbar_action.setChecked(True)
     window.toggle_statusbar_action.toggled.connect(window._toggle_statusbar)
 
+    window.toggle_history_action = QAction(window.tr("Show &History"), window)
+    window.toggle_history_action.setCheckable(True)
+    window.toggle_history_action.toggled.connect(window._toggle_history)
+
+    window.toggle_theme_action = QAction(window.tr("Switch to &Light Theme"), window)
+    window.toggle_theme_action.triggered.connect(window._toggle_theme)
+
+    window.command_palette_action = QAction(window.tr("&Command Palette..."), window)
+    window.command_palette_action.setShortcut("Ctrl+Shift+P")
+    window.command_palette_action.triggered.connect(window._show_command_palette)
+
     window.full_screen_action = QAction(window.tr("&Full Screen"), window)
     window.full_screen_action.setShortcut("F11")
     window.full_screen_action.setCheckable(True)
@@ -349,5 +413,9 @@ def build_view_menu(window: MainWindow) -> None:
     view_menu.addAction(window.toggle_toolbar_action)
     view_menu.addAction(window.toggle_sidebar_action)
     view_menu.addAction(window.toggle_statusbar_action)
+    view_menu.addAction(window.toggle_history_action)
+    view_menu.addSeparator()
+    view_menu.addAction(window.toggle_theme_action)
+    view_menu.addAction(window.command_palette_action)
     view_menu.addSeparator()
     view_menu.addAction(window.full_screen_action)
