@@ -2491,3 +2491,46 @@ Also: `add_ink_annot` wants plain `(x, y)` float pairs and rejects
 `fitz.Point` outright ("arg must be seq of seq of float pairs").
 
 Still to come in 6e: insert-content operations (text box, image).
+
+### 6f — redaction (done)
+
+`core/ops/redact.py`. Split from 6e deliberately: this is the one
+feature where a shortcut is a security failure rather than a UX
+compromise.
+
+**The finding that matters: `apply_redactions()` alone is not enough -
+the save matters.** After redacting "Jane Doe" from every page,
+`page.get_text()` came back clean and the string was **still present in
+the raw file bytes**. A plain `Document.save()` leaves the superseded
+content stream in the file as an unreferenced object, trivially
+recoverable. Measured on the same fixture:
+
+    plain save            "Jane Doe" in raw bytes: True   (3463 bytes)
+    garbage=1             False  (1939)
+    garbage=4, clean      False  (1242)
+
+So the operation saves with `garbage=4, clean=True, deflate=True`, and
+`tests/unit/test_redact.py` asserts against `read_bytes()` rather than
+extracted text - **a text-only test passes the leaking version**, which
+is exactly the failure mode this feature cannot afford.
+
+**Page content is not the only leak path.** Document metadata, the XMP
+packet, bookmark titles and embedded attachments all survive a content
+redaction untouched. `scan_for_text()` reports them separately from
+page hits, and the redact dialog shows them under "Also found outside
+the page content" - they are the occurrences a user does not think to
+check. The `scrub_*` flags only act when a `search_text` is given:
+without a term there is nothing to match metadata against, and blanking
+it unasked would be a surprise.
+
+`RedactOperation` takes explicit rects *and* an optional search term,
+so a CLI or Workflow run is exactly as thorough as an interactive one -
+the GUI's review step narrows what happens, it adds no capability. Undo
+is a snapshot restore, the only honest inverse for something
+destructive by design.
+
+**Redaction is confirmed, not applied on a drag.** "redact" is in the
+canvas's `DRAW_TOOLS` because the *gesture* is the same as drawing a
+shape, but the handler tells them apart: a redact drag prompts first,
+since unlike an annotation it cannot be recovered from the saved file -
+only undone from the session snapshot.

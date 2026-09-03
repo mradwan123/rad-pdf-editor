@@ -31,6 +31,7 @@ from core.session.session_dir import SessionTempDir
 from core.session.workflow_store import WorkflowStore
 from gui.dialogs.base_tool_dialog import BaseToolDialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
+from gui.dialogs.redact_dialog import RedactDialog
 from gui.dialogs.run_workflow_dialog import RunWorkflowDialog
 from gui.dialogs.sign_dialog import SignDialog
 from gui.dialogs.tool_dialog_registry import DialogFactory
@@ -117,6 +118,14 @@ class ToolRunnerMixin(WindowPart):
             working_path = tab.controller.doc.working_path
             assert working_path is not None
             dialog = SignDialog(self, working_path)
+        elif tool_id == "redact":
+            # Like fill_form and sign, this dialog does more when it can
+            # see the document: it scans it and shows what would be
+            # removed before anything is.
+            assert tab is not None
+            working_path = tab.controller.doc.working_path
+            assert working_path is not None
+            dialog = RedactDialog(self, working_path)
         else:
             dialog = dialog_cls(self)
 
@@ -201,7 +210,15 @@ class ToolRunnerMixin(WindowPart):
 
     def _on_annotation_drawn(self, tab: DocumentTab, page: int, kind: str, payload: Any) -> None:
         """A shape, ink stroke or note drawn directly on the page."""
-        if kind == "ink":
+        if kind == "redact":
+            # Destructive, and deliberately confirmed: unlike an
+            # annotation this cannot be recovered from the file, only
+            # undone from the session's snapshot.
+            if not self._confirm_redaction(1):
+                return
+            x0, y0, x1, y1 = payload
+            self._apply_to_tab(tab, "redact", rects=[(page, x0, y0, x1, y1)])
+        elif kind == "ink":
             self._apply_to_tab(tab, "add_annotation", page=page, kind=kind, strokes=payload)
         else:
             self._apply_to_tab(tab, "add_annotation", page=page, kind=kind, rect=tuple(payload))
@@ -213,6 +230,21 @@ class ToolRunnerMixin(WindowPart):
         self._apply_to_tab(
             tab, "edit_annotation", page=page, annot_id=annot_id, rect=tuple(rect)
         )
+
+    def _confirm_redaction(self, count: int) -> bool:
+        """Redaction removes content permanently - the point of the
+        feature - so it is confirmed rather than applied on a drag."""
+        response = QMessageBox.warning(
+            self,
+            self.tr("Redact"),
+            self.tr(
+                "Redacting permanently removes {0} region(s) from this document. "
+                "This cannot be recovered from the saved file."
+            ).format(count),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return response == QMessageBox.StandardButton.Ok
 
     def _delete_annotation_under_cursor(self) -> None:
         """Delete the annotation the page view currently has selected."""

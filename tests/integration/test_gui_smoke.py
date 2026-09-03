@@ -2544,3 +2544,93 @@ def test_prefill_does_not_overwrite_a_value_the_dialog_already_has(
     dialog.pages.setText("9")
     dialog.set_page_selection([1, 2])
     assert dialog.pages.text() == "9"
+
+
+def _make_secret_pdf(path: Path, secret: str = "Jane Doe") -> Path:
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page(width=400, height=600)
+    doc.new_page(width=400, height=600)
+    for i in (0, 1):
+        doc[i].insert_text((50, 100), f"{secret} is the claimant", fontsize=14)
+    doc.set_metadata({"author": secret, "title": f"{secret} statement"})
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_redacting_a_dragged_region_is_confirmed_first(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Phase 6f. Redaction destroys content, so a drag alone must not
+    commit it - unlike an annotation, it cannot be recovered from the
+    saved file."""
+    src = _make_secret_pdf(tmp_path / "src.pdf")
+    window = MainWindow()
+    tab = _open_tab(window, src)
+
+    with patch(
+        "gui.tool_runner.QMessageBox.warning",
+        return_value=QMessageBox.StandardButton.Cancel,
+    ) as warning:
+        tab.canvas.annotation_drawn.emit(1, "redact", (40.0, 480.0, 200.0, 520.0))
+
+    assert warning.called
+    assert not tab.controller.can_undo, "cancelling must change nothing"
+    _force_close(window)
+
+
+def test_confirmed_redaction_removes_the_text_from_the_file(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    import fitz
+
+    src = _make_secret_pdf(tmp_path / "src.pdf")
+    window = MainWindow()
+    tab = _open_tab(window, src)
+
+    with patch(
+        "gui.tool_runner.QMessageBox.warning",
+        return_value=QMessageBox.StandardButton.Ok,
+    ):
+        tab.canvas.annotation_drawn.emit(1, "redact", (40.0, 480.0, 220.0, 520.0))
+
+    with fitz.open(tab.controller.doc.working_path) as doc:
+        assert "Jane Doe" not in doc[0].get_text()
+        assert "Jane Doe" in doc[1].get_text(), "only the dragged region is redacted"
+    _force_close(window)
+
+
+def test_the_redact_dialog_reports_where_else_the_term_appears(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """The review step exists to surface the non-content leak paths -
+    metadata, bookmarks, attachments - which are the ones a user does
+    not think to check."""
+    from gui.dialogs.redact_dialog import RedactDialog
+
+    src = _make_secret_pdf(tmp_path / "src.pdf")
+    dialog = RedactDialog(None, src)
+    dialog.term.setText("Jane Doe")
+    dialog._run_scan()
+
+    assert dialog._scan is not None
+    assert dialog._scan.total_page_hits == 2
+    assert "author" in dialog._scan.metadata_keys
+    assert dialog.results.topLevelItemCount() == 2, "pages and 'found elsewhere'"
+    assert "elsewhere" in dialog.summary.text()
+
+
+def test_the_redact_dialog_works_without_a_document(qapp: QApplication) -> None:
+    """The Workflow builder constructs every tool dialog against no
+    document; a redact step must still be configurable."""
+    from gui.dialogs.redact_dialog import RedactDialog
+
+    dialog = RedactDialog(None, None)
+    dialog.term.setText("secret")
+
+    assert not dialog.scan_button.isEnabled()
+    values = dialog.values()
+    assert values["search_text"] == "secret"
+    assert values["rects"] == []

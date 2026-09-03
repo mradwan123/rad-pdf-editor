@@ -146,7 +146,7 @@ def _tool_categories(window: MainWindow) -> list[tuple[str, list[str]]]:
             window.tr("F&orms and Signatures"),
             ["fill_form", "sign", "create_form_field", "flatten", "remove_annotations"],
         ),
-        (window.tr("&Security"), ["protect", "unlock"]),
+        (window.tr("&Security"), ["protect", "unlock", "redact"]),
         (window.tr("&Document Properties"), ["set_metadata", "rename", "compress"]),
         (
             window.tr("Convert &from PDF"),
@@ -202,6 +202,7 @@ _DRAW_TOOLS = [
     ("line_tool_action", "&Line", "line"),
     ("ink_tool_action", "&Freehand", "ink"),
     ("note_tool_action", "Sticky &Note", "note"),
+    ("redact_tool_action", "&Redact Region", "redact"),
 ]
 
 

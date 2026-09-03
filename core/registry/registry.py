@@ -112,11 +112,13 @@ def _first_party_plugins() -> list[ToolPlugin]:
         ReorderPagesPlugin,
         RotatePagesPlugin,
     )
+    from core.ops.redact import RedactPlugin
     from core.ops.repair import RepairPlugin
     from core.ops.security import ProtectPlugin, UnlockPlugin
     from core.ops.watermark import WatermarkPlugin
 
     return [
+        RedactPlugin(),
         AddAnnotationPlugin(),
         EditAnnotationPlugin(),
         DeleteAnnotationPlugin(),

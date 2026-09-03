@@ -435,7 +435,7 @@ pytest — before the next begins.
 | **6c** | ✅ **Done.** Page viewer + sidebar layout (§3.2): continuous scroll, zoom, fit width/page, viewport-limited rendering, outline panel, find-in-document with highlights, drag-to-select text with copy, and links. |
 | **6d** | ✅ **Done.** Background execution with progress and cancel (§3.5). Applied operations run on a QThreadPool worker behind a window-modal, cancellable dialog; page-looping operations report real progress via the opt-in `SupportsProgress` mixin, everything else is indeterminate. |
 | **6e** | ✅ **Done** (markup half). `core/ops/annotate.py` with Add/Edit/Delete annotation operations, `/NM` identity, canvas draw tools, markup driven from the text selection, a re-editable annotation layer (pick, move, delete) and selection-aware dialogs. Insert-content ops (text box, image) deferred to 6e-2. |
-| **6f** | Redaction: rect, document-wide search-and-redact, and the metadata/XMP/bookmark/attachment scrub with its review step (§3.7). Split from 6e because it is security-critical and deserves its own verification pass. |
+| **6f** | ✅ **Done.** Redaction: dragged region, document-wide search-and-redact, and the metadata/XMP/bookmark/attachment scrub with its review step (§3.7). Verified against **raw file bytes**, not extracted text - a plain save leaves the redacted string recoverable in the file. |
 | **6g** | Design system: icons, toolbar, panels, notifications, light/dark, command palette (§3.6); session restore and its preference (§3.7). |
 | **6h** | Text editing (§5.1), explicitly experimental, with the font-substitution preview of §3.7 gating every commit. |
 

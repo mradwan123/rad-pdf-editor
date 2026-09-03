@@ -44,6 +44,7 @@ from gui.dialogs.pdf_to_pptx_dialog import PdfToPptxDialog
 from gui.dialogs.pdf_to_xlsx_dialog import PdfToXlsxDialog
 from gui.dialogs.pptx_to_pdf_dialog import PptxToPdfDialog
 from gui.dialogs.protect_dialog import ProtectDialog
+from gui.dialogs.redact_dialog import RedactDialog
 from gui.dialogs.remove_annotations_dialog import RemoveAnnotationsDialog
 from gui.dialogs.rename_dialog import RenameDialog
 from gui.dialogs.reorder_pages_dialog import ReorderPagesDialog
@@ -65,6 +66,7 @@ DialogFactory = Callable[[QWidget | None], BaseToolDialog]
 #: shared, WorkflowBuilderDialog's "Add Step..." picker opens the exact
 #: same dialog every other feature uses for a given tool_id.
 TOOL_DIALOGS: dict[str, DialogFactory] = {
+    "redact": RedactDialog,
     "merge": MergeDialog,
     "extract_pages": ExtractPagesDialog,
     "reorder_pages": ReorderPagesDialog,

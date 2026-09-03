@@ -205,7 +205,10 @@ class PageItem(QGraphicsItem):
 #: is deliberately *not* here: highlight/underline/strikeout act on the
 #: current text selection instead, which is both the familiar gesture
 #: and a reuse of the selection machinery built in 6c.
-DRAW_TOOLS = ("rect", "circle", "line", "ink", "note")
+#: "redact" is here because the *gesture* is the same - drag a
+#: region - even though it commits a RedactOperation rather than an
+#: annotation. The distinction is made by the handler, not the drag.
+DRAW_TOOLS = ("rect", "circle", "line", "ink", "note", "redact")
 
 
 class PageCanvas(QGraphicsView):
