@@ -115,10 +115,12 @@ def _first_party_plugins() -> list[ToolPlugin]:
     from core.ops.redact import RedactPlugin
     from core.ops.repair import RepairPlugin
     from core.ops.security import ProtectPlugin, UnlockPlugin
+    from core.ops.text_edit import EditTextPlugin
     from core.ops.watermark import WatermarkPlugin
 
     return [
         RedactPlugin(),
+        EditTextPlugin(),
         AddAnnotationPlugin(),
         EditAnnotationPlugin(),
         DeleteAnnotationPlugin(),

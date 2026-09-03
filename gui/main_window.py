@@ -129,6 +129,7 @@ class MainWindow(TabManagementMixin, ToolRunnerMixin, QMainWindow):
     ink_tool_action: QAction
     note_tool_action: QAction
     redact_tool_action: QAction
+    edit_text_tool_action: QAction
     toggle_history_action: QAction
     toggle_theme_action: QAction
     command_palette_action: QAction

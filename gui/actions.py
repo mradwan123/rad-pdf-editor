@@ -207,6 +207,7 @@ _DRAW_TOOLS = [
     ("ink_tool_action", "&Freehand", "ink"),
     ("note_tool_action", "Sticky &Note", "note"),
     ("redact_tool_action", "&Redact Region", "redact"),
+    ("edit_text_tool_action", "&Edit Text (experimental)", "edit_text"),
 ]
 
 

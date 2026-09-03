@@ -30,6 +30,7 @@ from core.ops.forms import list_form_field_names
 from core.session.session_dir import SessionTempDir
 from core.session.workflow_store import WorkflowStore
 from gui.dialogs.base_tool_dialog import BaseToolDialog
+from gui.dialogs.edit_text_dialog import build_edit_text_dialog
 from gui.dialogs.fill_form_dialog import FillFormDialog
 from gui.dialogs.redact_dialog import RedactDialog
 from gui.dialogs.run_workflow_dialog import RunWorkflowDialog
@@ -210,6 +211,9 @@ class ToolRunnerMixin(WindowPart):
 
     def _on_annotation_drawn(self, tab: DocumentTab, page: int, kind: str, payload: Any) -> None:
         """A shape, ink stroke or note drawn directly on the page."""
+        if kind == "edit_text":
+            self._edit_text_at(tab, page, payload)
+            return
         if kind == "redact":
             # Destructive, and deliberately confirmed: unlike an
             # annotation this cannot be recovered from the file, only
@@ -230,6 +234,28 @@ class ToolRunnerMixin(WindowPart):
         self._apply_to_tab(
             tab, "edit_annotation", page=page, annot_id=annot_id, rect=tuple(rect)
         )
+
+    def _edit_text_at(self, tab: DocumentTab, page: int, point: Any) -> None:
+        """Edit whichever text span sits under `point`.
+
+        Experimental (docs/GUI_PLAN.md §5.1): the dialog exists mainly
+        to show, before anything is written, whether the original font
+        can be reproduced - decision 12.
+        """
+        working_path = tab.controller.doc.working_path
+        if working_path is None:
+            return
+        x, y = point
+        dialog = build_edit_text_dialog(self, working_path, page, x, y)
+        if dialog is None:
+            self._show_error_message(self.tr("No editable text at that point."))
+            return
+        try:
+            if dialog.exec() != BaseToolDialog.DialogCode.Accepted:
+                return
+            self._apply_to_tab(tab, "edit_text", **dialog.values())
+        finally:
+            dialog.release_resources()
 
     def _confirm_redaction(self, count: int) -> bool:
         """Redaction removes content permanently - the point of the

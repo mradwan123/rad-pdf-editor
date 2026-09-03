@@ -2805,3 +2805,95 @@ def test_a_missing_document_is_skipped_on_restore(
 
     assert window.tab_widget.count() == 0
     window.close()
+
+
+def _make_text_pdf(path: Path, text: str = "Total due: 4200.00") -> Path:
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page(width=400, height=300)
+    doc[0].insert_text((50, 100), text, fontsize=14, fontname="helv")
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_the_edit_text_dialog_warns_about_a_substituted_font(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Phase 6h / decision 12. The point of the dialog is the warning:
+    the user learns the replacement will look different *before*
+    anything is written, not after saving."""
+    from gui.dialogs.edit_text_dialog import build_edit_text_dialog
+
+    src = _make_text_pdf(tmp_path / "src.pdf")
+    dialog = build_edit_text_dialog(None, src, 1, 100.0, 200.0)
+
+    assert dialog is not None
+    assert dialog.would_substitute_font is True
+    assert "cannot be reproduced" in dialog.warning.text()
+    assert dialog.original.text() == "Total due: 4200.00"
+
+
+def test_clicking_where_there_is_no_text_reports_it(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from gui.dialogs.edit_text_dialog import build_edit_text_dialog
+
+    src = _make_text_pdf(tmp_path / "src.pdf")
+    assert build_edit_text_dialog(None, src, 1, 5.0, 5.0) is None
+
+
+def test_editing_text_through_the_window(qapp: QApplication, tmp_path: Path) -> None:
+    import fitz
+
+    from gui.dialogs.edit_text_dialog import EditTextDialog
+
+    src = _make_text_pdf(tmp_path / "src.pdf")
+    window = MainWindow()
+    tab = _open_tab(window, src)
+
+    def fake_exec(dialog: EditTextDialog) -> int:
+        dialog.new_text.setText("Total due: 9999.99")
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(EditTextDialog, "exec", fake_exec):
+        tab.canvas.annotation_drawn.emit(1, "edit_text", (100.0, 200.0))
+
+    with fitz.open(tab.controller.doc.working_path) as doc:
+        assert doc[0].get_text().strip() == "Total due: 9999.99"
+    assert "substituted font" in tab.controller.doc.operation_log[-1].describe()
+
+    window._undo()
+    with fitz.open(tab.controller.doc.working_path) as doc:
+        assert doc[0].get_text().strip() == "Total due: 4200.00"
+    _force_close(window)
+
+
+def test_cancelling_the_edit_changes_nothing(qapp: QApplication, tmp_path: Path) -> None:
+    from gui.dialogs.edit_text_dialog import EditTextDialog
+
+    src = _make_text_pdf(tmp_path / "src.pdf")
+    window = MainWindow()
+    tab = _open_tab(window, src)
+
+    with patch.object(EditTextDialog, "exec", lambda self: QDialog.DialogCode.Rejected):
+        tab.canvas.annotation_drawn.emit(1, "edit_text", (100.0, 200.0))
+
+    assert not tab.controller.can_undo
+    _force_close(window)
+
+
+def test_clicking_empty_space_with_the_text_tool_errors_cleanly(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    src = _make_text_pdf(tmp_path / "src.pdf")
+    window = MainWindow()
+    tab = _open_tab(window, src)
+
+    with patch("gui.main_window.QMessageBox.critical") as critical:
+        tab.canvas.annotation_drawn.emit(1, "edit_text", (5.0, 5.0))
+
+    assert critical.called
+    assert not tab.controller.can_undo
+    _force_close(window)

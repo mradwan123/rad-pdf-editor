@@ -2599,3 +2599,57 @@ Two Qt notes worth keeping:
   a child of a never-shown window always reports invisible, so
   visibility meant the panel never populated under test - and the
   action is the user's intent anyway. Same trap as the find bar.
+
+### 6h — editing existing text (done; experimental by design)
+
+`core/ops/text_edit.py`. The feature users most associate with "PDF
+editor" and the one most likely to disappoint, so its limits are stated
+rather than discovered.
+
+**There is no "change this text run" API.** The technique, verified end
+to end: read the span from `get_text("dict")` (text, font, size,
+colour, bbox, baseline origin), decide whether the font can be
+reproduced, redact the old bbox, re-insert at the same origin.
+
+**Font extractability is measured, not guessed from the name.**
+`doc.extract_font(xref)` returns `ext='n/a'` and a **0-byte** buffer
+for a base-14 font, and `ext='ttf'` with **759 KB** for a genuinely
+embedded one - so buffer length is the test. Where the buffer exists it
+is written into the session temp dir and re-embedded, and the
+replacement really does render in the original typeface (confirmed: the
+edited span came back reporting `DejaVuSans`).
+
+**A name match is not a name match.** `get_fonts()` reported the same
+face as `"DejaVu Sans Book"` while the span called it `"DejaVuSans"`.
+Comparing the raw strings found nothing, so *every* font looked
+non-embedded and the re-embedding path was silently dead - the tests
+passed for the base-14 case and only the embedded-font test caught it.
+`_normalise_font_name` strips the subset prefix and all non-alphanumerics
+and matches in either direction.
+
+**Decision 12 is enforced in two places, not one.** `EditTextDialog`
+shows the warning and a preview *before* anything is written, and
+`describe()` appends "(substituted font)" so the fact survives into the
+undo stack and the audit log - the failure mode to avoid is not
+imperfection but *undisclosed* imperfection.
+
+**Scope, deliberately narrow:** one span, one line. Reflowing a
+paragraph across line breaks, around figures or across a page boundary
+is materially harder and is not attempted.
+
+Undo is a snapshot restore: redact-and-reinsert destroys the original
+glyphs, so nothing else would be honest. The save uses
+`garbage=4, clean=True` for the same reason redaction does - otherwise
+the replaced text stays recoverable in the raw bytes.
+
+---
+
+## Phase 6 complete
+
+All eight slices are built, tested and pushed. The suite went from
+**478** at the start of Phase 6 to **660+**, with `ruff` and
+`mypy core cli gui` clean throughout, and every slice verified against
+real output and a `widget.grab()` screenshot rather than a green test
+run alone - which is what caught the two blank-viewer bugs, the
+invisible annotations, and the half-applied light theme, none of which
+any assertion was covering.

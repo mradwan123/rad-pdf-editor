@@ -18,6 +18,7 @@ from core.registry.registry import Registry, discover_and_load
 EXPECTED_TOOL_IDS = {
     # Phase 6e - the first operations that edit content *on* a page.
     "redact",
+    "edit_text",
     "add_annotation",
     "edit_annotation",
     "delete_annotation",

@@ -4,8 +4,8 @@ Extends `docs/SPEC.md` section 4's roadmap with a sixth phase. SPEC.md
 stays the source of truth for the locked requirements and the frozen
 interfaces; this document is the design record for Phase 6 only.
 
-Status: **6a, 6b and 6c done**; 6d onward not started. Slice status is
-in the §4 table.
+Status: **Phase 6 complete** - all eight slices (6a-6h) built, tested and
+pushed. Slice status is in the §4 table.
 
 ---
 
@@ -437,7 +437,7 @@ pytest — before the next begins.
 | **6e** | ✅ **Done** (markup half). `core/ops/annotate.py` with Add/Edit/Delete annotation operations, `/NM` identity, canvas draw tools, markup driven from the text selection, a re-editable annotation layer (pick, move, delete) and selection-aware dialogs. Insert-content ops (text box, image) deferred to 6e-2. |
 | **6f** | ✅ **Done.** Redaction: dragged region, document-wide search-and-redact, and the metadata/XMP/bookmark/attachment scrub with its review step (§3.7). Verified against **raw file bytes**, not extracted text - a plain save leaves the redacted string recoverable in the file. |
 | **6g** | ✅ **Done.** Hand-drawn `QPainter` icon set, a grouped toolbar, the History panel, a light theme derived from the dark stylesheet by lightness inversion, a command palette, and UI/session state persistence behind the reopen preference. Inline notifications deferred. |
-| **6h** | Text editing (§5.1), explicitly experimental, with the font-substitution preview of §3.7 gating every commit. |
+| **6h** | ✅ **Done.** Text editing (§5.1), explicitly experimental: click a span, see whether its font can be reproduced, then replace it. Embedded fonts are re-embedded; otherwise a substitute is used and both the dialog and the undo entry say so. Single span, single line - no reflow. |
 
 6a–6d are infrastructure with no new user-facing tools; 6c is the
 first slice that visibly changes the product.

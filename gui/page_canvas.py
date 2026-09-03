@@ -210,7 +210,10 @@ class PageItem(QGraphicsItem):
 #: "redact" is here because the *gesture* is the same - drag a
 #: region - even though it commits a RedactOperation rather than an
 #: annotation. The distinction is made by the handler, not the drag.
-DRAW_TOOLS = ("rect", "circle", "line", "ink", "note", "redact")
+#: "edit_text" is a *click*, not a drag - it is here because it is a
+#: canvas tool the toolbar switches to, and _begin_draw commits it
+#: immediately the same way a sticky note does.
+DRAW_TOOLS = ("rect", "circle", "line", "ink", "note", "redact", "edit_text")
 
 
 class PageCanvas(QGraphicsView):
@@ -634,8 +637,8 @@ class PageCanvas(QGraphicsView):
         self._draw_page = page
         self._draw_origin = point
         self._draw_strokes = [[(point.x(), point.y())]] if self._tool == "ink" else []
-        if self._tool == "note":
-            # A note is a point, not a drag - commit it immediately.
+        if self._tool in ("note", "edit_text"):
+            # Both are a point, not a drag - committed immediately.
             self._commit_draw(point)
 
     def _extend_draw(self, point: QPointF) -> None:
@@ -661,6 +664,12 @@ class PageCanvas(QGraphicsView):
                 return  # a click, not a stroke
             flipped = [[(x, height - y) for x, y in strokes[0]]]
             self.annotation_drawn.emit(page, "ink", flipped)
+            return
+
+        if tool == "edit_text":
+            # The point itself is the payload: the handler looks up
+            # whichever span is under it.
+            self.annotation_drawn.emit(page, tool, (origin.x(), height - origin.y()))
             return
 
         rect = QRectF(origin, point).normalized()
