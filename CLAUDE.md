@@ -2579,3 +2579,57 @@ Full suite: **580 passed** - 562 on this fix's own branch (560 + 2
 new), then 580 once merged with the conversion-audit work above, which
 had landed on `main` meanwhile. `ruff check .` clean,
 `mypy core cli gui` clean.
+
+## "I can't see it when creating a form field" - a third way the two PDF engines disagree
+
+User report. Reproduced directly against `CreateFormFieldOperation`,
+outside the GUI, before touching any code: the operation genuinely
+creates the widget (checked via fitz - correct field name, type,
+value, rect) and PyMuPDF renders it fine. The bug is entirely in
+`_render_thumbnails` - the thumbnail the user actually looks at showed
+a blank page.
+
+This is a second, distinct way QtPdf and PyMuPDF disagree, beyond the
+load-failure case the section above already documents:
+
+- **QtPdf paints zero annotations of any kind by default.** Confirmed
+  by hand: a plain `fitz`-added rect annotation (no form involved)
+  rendered as 0 non-background pixels via `QPdfDocument.render()` with
+  no options, and 4444 with `QPdfDocumentRenderOptions.RenderFlag.Annotations`
+  set - so the flag genuinely works for ordinary annotations.
+- **An AcroForm widget - what `CreateFormFieldOperation`/
+  `FillFormOperation` actually produce - renders as nothing *even with
+  that flag set*.** A freshly created text field with a default value
+  came back as 0 non-background pixels via QtPdf regardless, 351 via
+  PyMuPDF, sampled from the identical rendered rect on the identical
+  file. This isn't a missing flag: pdfium needs a form-filling
+  environment to paint widget appearances, which `QPdfDocument` never
+  sets up and Qt exposes no API to set up. Structural, not a
+  configuration gap.
+
+**Fix**: `_render_thumbnails` now checks `list_form_field_names(path)`
+(already existed, `core/ops/forms.py`, a cheap `pikepdf.Pdf.open` +
+`pdf.acroform` check with no page-tree walk) before touching QtPdf at
+all. Any document with at least one AcroForm field is routed straight
+to the same PyMuPDF fallback the load-failure case already uses -
+pulled out into its own `_render_thumbnails_with_fitz` helper so both
+callers share it rather than duplicating the loop. QtPdf stays
+untouched as the primary engine for every ordinary document. This
+incidentally also fixes Fill Form's thumbnail (same widget-rendering
+gap, not separately investigated but covered by the same check, since
+a filled field is still an AcroForm field).
+
+**Why the existing `test_create_form_field_via_tools_menu_adds_a_text_field`
+never caught this**: it only asserted against the produced *file*
+(via fitz) - which was always correct, since the bug was never in
+`CreateFormFieldOperation`. Extended with a real thumbnail pixel scan
+(`item.icon().pixmap(...).toImage()`, checking for any non-white
+pixel) - confirmed to fail against the pre-fix code (reproduced this
+exact bug) and pass after. Also visually verified per this project's
+usual discipline: the real `MainWindow`, `grab()`-ed to PNG after
+running Create Form Field through the actual Tools-menu flow, shows
+"Jane Doe" legible in the thumbnail.
+
+Full suite: **580 passed** (no new test count change - the coverage
+gap was closed by strengthening the existing test, not adding one),
+`ruff check .` clean, `mypy core cli gui` clean.

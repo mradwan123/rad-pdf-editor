@@ -1274,21 +1274,50 @@ class MainWindow(QMainWindow):
         if no engine could render the document at all.
 
         Two engines, because they genuinely disagree about which files
-        are readable. The app opens and validates documents with pikepdf
-        (qpdf), which silently repairs a damaged cross-reference table,
-        so a truncated PDF opens perfectly happily and reports its real
-        page count - while QtPdf rejects the identical file outright
-        with InvalidFileFormat. That combination used to log one line
-        and return, leaving a document that was "open" with an
+        are readable - and, separately, about what's actually on a page
+        that both agree they can read.
+
+        Load failure: the app opens and validates documents with
+        pikepdf (qpdf), which silently repairs a damaged cross-reference
+        table, so a truncated PDF opens perfectly happily and reports
+        its real page count - while QtPdf rejects the identical file
+        outright with InvalidFileFormat. That combination used to log
+        one line and return, leaving a document that was "open" with an
         empty grid and nothing on screen explaining why: the reported
         "I open a PDF and there is no thumbnail" bug, reproduced exactly
         against a PDF truncated to 85% of its length.
 
-        QtPdf stays the primary engine (unchanged for every file that
-        already worked). PyMuPDF - already a dependency, and the same
-        renderer the conversion ops use - is tried only when QtPdf
-        refuses, and renders those damaged files fine.
+        Silent content omission: QtPdf's render() paints zero
+        annotations by default (confirmed: a plain rect annotation
+        renders invisibly without `RenderFlag.Annotations`) and, worse,
+        an AcroForm widget - the kind `CreateFormFieldOperation` and
+        `FillFormOperation` produce - renders as nothing *even with*
+        that flag set, while PyMuPDF renders the identical widget
+        correctly. Confirmed by hand: a freshly created text field with
+        a default value came back as 0 non-background pixels via QtPdf,
+        351 via PyMuPDF, in the exact same rendered rect. This is a
+        structural QtPdf limitation, not a missing flag - pdfium needs a
+        form-filling environment to paint widget appearances that
+        `QPdfDocument` never sets up, and Qt exposes no API for it. So a
+        document containing any AcroForm field is routed to the PyMuPDF
+        fallback below unconditionally - the reported "I can't see it
+        when creating a form field" bug: the field really was created
+        (verified via `list_form_field_names`/fitz), QtPdf just never
+        painted it in the thumbnail that's supposed to show it.
+
+        QtPdf stays the primary engine for everything else (unchanged
+        for every plain file that already worked). PyMuPDF - already a
+        dependency, and the same renderer the conversion ops use - is
+        used whenever QtPdf refuses to load a file, or can't be trusted
+        to show what's actually in it.
         """
+        try:
+            has_form_fields = bool(list_form_field_names(path))
+        except Exception:
+            has_form_fields = False
+        if has_form_fields:
+            return self._render_thumbnails_with_fitz(thumbnail_list, path)
+
         # No parent: this is a short-lived, throwaway document used
         # only to render thumbnails for this one _refresh() call. A
         # `self`-parented QPdfDocument would live as long as
@@ -1304,6 +1333,9 @@ class MainWindow(QMainWindow):
         log.warning(
             "QtPdf could not load '%s' for thumbnails; falling back to PyMuPDF.", path
         )
+        return self._render_thumbnails_with_fitz(thumbnail_list, path)
+
+    def _render_thumbnails_with_fitz(self, thumbnail_list: QListWidget, path: Path) -> bool:
         try:
             with fitz.open(str(path)) as src:
                 for i in range(src.page_count):
