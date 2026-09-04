@@ -15,7 +15,7 @@ class FillFormDialog(BaseToolDialog):
     special-cased instantiation."""
 
     def __init__(self, field_names: list[str], parent: QWidget | None = None) -> None:
-        super().__init__(self.tr("Fill Form"), parent)
+        super().__init__(self.tr("Fill Form"), parent, scrollable=True)
         self._inputs: dict[str, QLineEdit] = {}
         if not field_names:
             self.add_full_width(QLabel(self.tr("This document has no fillable form fields.")))

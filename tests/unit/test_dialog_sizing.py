@@ -27,7 +27,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pikepdf
 import pytest
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QScrollArea
 
 from core.document_info import read_document_info
 from core.registry.registry import Registry, discover_and_load
@@ -249,6 +249,58 @@ def test_fill_form_dialog_with_real_long_field_names_fits_its_buttons() -> None:
     _qapp()
     dialog = FillFormDialog(["name", "email", "date", "a_pretty_long_field_name_example"])
     _assert_no_button_is_narrower_than_its_own_text_needs(dialog)
+
+
+def test_fill_form_dialog_wraps_its_fields_in_a_scroll_area() -> None:
+    # A plain QFormLayout dialog either grows without bound or gets
+    # silently clipped by Qt's own two-thirds-of-screen cap with no
+    # way to reach the rows past it (see base_tool_dialog.py's
+    # _FormScrollArea docstring) - only FillFormDialog needs the fix,
+    # since it's the one dialog whose row count depends on the open
+    # document rather than being fixed by the tool itself, so this
+    # also checks the opt-in is scoped there and not turned on for
+    # every dialog.
+    _qapp()
+    dialog = FillFormDialog(["name", "email"])
+    scroll_areas = dialog.findChildren(QScrollArea)
+    assert len(scroll_areas) == 1
+    assert scroll_areas[0].widget() is dialog._form.parentWidget()
+
+    plain = RotateDialog()
+    assert plain.findChildren(QScrollArea) == []
+
+
+def test_fill_form_dialog_with_many_fields_is_actually_scrollable() -> None:
+    # Confirms the rows past Qt's own screen-size cap are genuinely
+    # reachable via the scroll area, not merely present-but-invisible -
+    # the exact failure a plain QFormLayout dialog has no way to
+    # recover from.
+    _qapp()
+    dialog = FillFormDialog([f"field_{i}" for i in range(60)])
+    dialog.show()
+    try:
+        scroll = dialog.findChildren(QScrollArea)[0]
+        content = scroll.widget()
+        assert content is not None
+        assert content.sizeHint().height() > scroll.viewport().height()
+        assert scroll.verticalScrollBar().maximum() > 0
+        # every field is still really there, just not all visible at once
+        assert len(dialog._inputs) == 60
+    finally:
+        dialog.close()
+
+
+def test_fill_form_dialog_with_few_fields_has_no_visible_scrollbar() -> None:
+    # A short form must look and behave exactly as it did before this
+    # fix - no dead scroll chrome for the common case.
+    _qapp()
+    dialog = FillFormDialog(["name", "email", "date"])
+    dialog.show()
+    try:
+        scroll = dialog.findChildren(QScrollArea)[0]
+        assert scroll.verticalScrollBar().maximum() == 0
+    finally:
+        dialog.close()
 
 
 def test_workflow_builder_dialog_buttons_fit_their_text() -> None:
