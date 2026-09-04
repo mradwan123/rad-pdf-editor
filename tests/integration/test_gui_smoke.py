@@ -782,6 +782,28 @@ def test_create_form_field_via_tools_menu_adds_a_text_field(
     assert widgets[0].field_name == "full_name"
     assert widgets[0].field_value == "Jane Doe"
     assert window.undo_action.isEnabled()
+
+    # Regression: this is the "I can't see it when creating a form
+    # field" bug. The widget genuinely exists in the file (checked
+    # above via fitz) - but QtPdf's render() used to paint zero
+    # annotations of any kind by default, and an AcroForm widget
+    # specifically renders as nothing even with RenderFlag.Annotations
+    # set (confirmed by hand: pdfium needs a form-filling environment
+    # QPdfDocument never sets up). So the thumbnail the user actually
+    # looks at showed a blank page even though the field was really
+    # created - a bug the fitz-only assertions above could never catch,
+    # since they check the file, not what's on screen.
+    tab = window.current_tab
+    assert tab is not None
+    item = tab.thumbnail_list.item(0)
+    assert item is not None
+    image = item.icon().pixmap(window.thumbnail_size).toImage()
+    non_white = any(
+        image.pixelColor(x, y).getRgb()[:3] != (255, 255, 255)
+        for x in range(image.width())
+        for y in range(image.height())
+    )
+    assert non_white, "the created form field is not visible in its own thumbnail"
     _force_close(window)
 
 
