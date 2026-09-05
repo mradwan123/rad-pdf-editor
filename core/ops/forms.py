@@ -194,47 +194,32 @@ class RemoveAnnotationsOperation(Operation):
         return "Removed annotations"
 
 
-def _widget_field_name(annot: pikepdf.Object) -> str | None:
-    """Reconstructs a widget annotation's fully-qualified field name by
-    walking its `/Parent` chain and joining each `/T` segment with
-    "." - the same convention `pikepdf.Field.fully_qualified_name`
-    uses, so names line up with `list_form_field_names`'s output."""
-    parts: list[str] = []
-    obj: pikepdf.Object | None = annot
-    for _ in range(32):  # generous ceiling on /Parent chain depth
-        if obj is None:
-            break
-        t = obj.get("/T")
-        if t is not None:
-            parts.append(str(t))
-        obj = obj.get("/Parent")
-    return ".".join(reversed(parts)) if parts else None
-
-
 def _visual_field_order(pdf: pikepdf.Pdf) -> dict[str, tuple[int, float, float]]:
     """Maps each field's fully-qualified name to a (page index, top,
     left) sort key taken from its own widget annotation's page and
-    `/Rect` - reading order, not the order `af.fields` happens to walk
+    rect - reading order, not the order `af.fields` happens to walk
     the `/AcroForm /Fields` array/tree in, which only reflects
     creation order and need not match where a field actually sits on
-    the page."""
+    the page.
+
+    Built from pikepdf's own `AcroForm` helpers rather than walking
+    `/Annots`/`/Parent` by hand: `get_widget_annotations_for_page`
+    already filters to widgets, `get_field_for_annotation` already
+    resolves the `/Parent` chain into the same fully-qualified name
+    `af.fields` reports, and `Annotation.rect` is a pre-normalized
+    `Rectangle` (`llx <= urx`, `lly <= ury` regardless of how `/Rect`
+    was written), so no min/max is needed."""
+    af = pdf.acroform
     order: dict[str, tuple[int, float, float]] = {}
     for page_index, page in enumerate(pdf.pages):
-        annots = page.obj.get("/Annots")
-        if annots is None:
-            continue
-        for annot in annots:
-            if str(annot.get("/Subtype")) != "/Widget":
+        for annot in af.get_widget_annotations_for_page(page):
+            name = str(af.get_field_for_annotation(annot).fully_qualified_name)
+            if name in order:
                 continue
-            rect = annot.get("/Rect")
-            name = _widget_field_name(annot)
-            if rect is None or name is None or name in order:
-                continue
-            x0, y0, x1, y1 = (float(v) for v in rect)
             # PDF's origin is bottom-left with y growing upward, so the
             # top of the page is the *larger* y - negate it to sort
             # top-to-bottom with a plain ascending sort.
-            order[name] = (page_index, -max(y0, y1), min(x0, x1))
+            order[name] = (page_index, -annot.rect.ury, annot.rect.llx)
     return order
 
 
