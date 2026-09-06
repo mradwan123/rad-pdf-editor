@@ -2579,3 +2579,93 @@ Full suite: **580 passed** - 562 on this fix's own branch (560 + 2
 new), then 580 once merged with the conversion-audit work above, which
 had landed on `main` meanwhile. `ruff check .` clean,
 `mypy core cli gui` clean.
+
+## File > Open now accepts Word/PowerPoint/Excel/HTML/images (done)
+
+User report, worth recording precisely because two different things
+were bundled in it and only one was a real gap: "I cannot open files
+that are not PDF; the Word to PDF feature can't be run unless I have
+a Word doc selected." The second half was already fixed (see "Word to
+PDF audit" above - `docx_to_pdf` has worked with nothing open since
+that fix, and "selected" there just meant the tool's own file picker,
+which is how every external-source conversion necessarily works).
+The first half was real: `File > Open`'s dialog filter was hardcoded
+to `*.pdf`, and even bypassing the filter (a path handed to
+`_open_document_path` directly, e.g. via Recent Files) would have
+copied a `.docx` in verbatim - `AppController.open_document` doesn't
+care about the source extension, but every editing `Operation` and
+the QtPdf/fitz thumbnail renderer assume the working file already is
+a PDF. Confirmed by hand before fixing: `open_document` on a real
+`.docx` left `working_path` pointing at a `working.docx` that
+`pdfplumber.open` immediately rejects (`PdfminerException: No /Root
+object!`) - not a hypothetical failure mode.
+
+**Fix has two parts, deliberately not one.** `core/ops/common.py` gains
+`CONVERTIBLE_OPEN_EXTENSIONS: dict[str, str]` (extension -> tool_id),
+placed next to `EXTERNAL_SOURCE_TOOL_IDS` since it's the same kind of
+shared, must-not-drift membership table. `gui/main_window.py`'s
+`_open_document` widens the dialog filter to include `.docx`/`.pptx`/
+`.xlsx`/`.html`/`.htm`/`.jpg`/`.jpeg`/`.png` alongside `*.pdf`, and
+`_open_document_path` (shared by the Open dialog and Recent Files, so
+both get this for free) branches on `CONVERTIBLE_OPEN_EXTENSIONS`:
+a PDF still goes through `open_document` unchanged, anything else
+builds the matching conversion `Operation` via the registry
+(`_build_open_conversion_operation` - `jpg_to_pdf` takes `sources`,
+a list, shared with its Tools-menu combine-several-images form; the
+other four take singular `source_path`) and runs it through a new
+`AppController.open_document_via_conversion(source_path, operation)`.
+
+**Why that needed a new controller method rather than reusing
+`apply_operation`**: `apply_operation` builds on top of whatever
+document is already in the tab (that's the whole point of it), and
+would have recorded the conversion as an undoable step - undo would
+then take a converted Word document back to a blank PDF rather than
+back to "nothing open", the wrong mental model for something that's
+supposed to read as "I opened a file", not "I ran a tool on one".
+`open_document_via_conversion` mirrors `open_document`'s own
+reset-and-replace shape instead: it runs the conversion into a
+placeholder in a *new* session (attempted before the previous session
+is closed - same failed-open-leaves-the-old-document-alone guarantee
+`open_document` already gives), then discards the operation's own
+`operation_log` entry and builds a fresh `DocumentSession` with an
+empty one, keeping `source_path` as the original external file (not
+the converted PDF) so Recent Files, Properties, and the audit trail
+all still name the real file the user opened.
+
+**A real bug caught before it shipped, not found by a test failing
+after the fact**: the first version called `operation.apply(placeholder)`
+directly - the same style `_export_document` already uses for the
+reverse (PDF -> external) direction - and it's wrong here. CLAUDE.md's
+own "Word to PDF audit" entry already documents that `DocumentSession.apply`
+is what turns python-docx's raw `PackageNotFoundError` into
+`OperationError` on an unreadable `.docx`; calling `operation.apply()`
+bare skips that wrapping entirely, so a bad source file would have
+raised an uncaught library exception straight through `_open_document_path`'s
+`except PDFEditorError` instead of showing the normal error dialog.
+`_export_document` never hits this because none of its five ops are
+`docx_to_pdf`. Fixed by going through `placeholder.apply(operation)`
+(`DocumentSession`'s own `apply`) instead, keeping the discard-the-log
+step the same.
+
+Six new tests, all confirmed to actually exercise the fix (the
+main one - opening a real `.docx` and reading its text back via
+`pdfplumber` - was run by hand against the pre-fix `open_document`
+call first and confirmed to fail with exactly the `PdfminerException`
+above, not just assumed to). `tests/unit/test_gui_controller.py`:
+`open_document_via_conversion` produces a real PDF while keeping the
+original file as `source_path`, records no undo entry, and a failed
+conversion leaves whatever was already open genuinely untouched.
+`tests/integration/test_gui_smoke.py`: the real `_open_document()`
+flow (patching only `QFileDialog.getOpenFileName`, not
+`_open_document_path`, so the dialog wiring itself is exercised) opens
+a `.docx` into a rendered tab with real extractable text and no undo
+entry and adds it to Recent Files; an unreadable `.docx` opened via
+File > Open shows an error without stranding a tab (same
+`libreoffice_binary`-forced-off fallback-engine trick the existing
+Tools-menu version of this test already uses, and the same reason -
+LibreOffice happily "converts" a plain text file with a `.docx` name);
+and replacing an already-open tab with an unreadable `.docx` leaves
+that tab's original document and page count untouched.
+
+Full suite: **586 passed** (580 baseline + 6 new), `ruff check .`
+clean, `mypy core cli gui` clean.

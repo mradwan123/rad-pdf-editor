@@ -455,6 +455,96 @@ def test_word_to_pdf_with_an_unreadable_source_does_not_strand_an_empty_tab(
     _force_close(window)
 
 
+def test_opening_a_word_document_via_file_open_converts_it_to_pdf(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """File > Open used to only accept *.pdf - a .docx (or the other
+    CONVERTIBLE_OPEN_EXTENSIONS formats) had no way in except via the
+    Tools menu's own file picker. Drives the real Open dialog flow
+    (patching only the native file picker, not _open_document_path)
+    end to end: pick a .docx, land on a real, rendered PDF tab."""
+    import pdfplumber
+
+    source = _make_docx(tmp_path / "in.docx")
+    window = MainWindow()
+    assert window.tab_widget.count() == 0
+
+    with patch(
+        "gui.main_window.QFileDialog.getOpenFileName", return_value=(str(source), "")
+    ):
+        window._open_document()
+
+    assert window.tab_widget.count() == 1
+    controller = window.controller
+    assert controller is not None and controller.is_open
+    assert controller.doc.source_path == source
+    assert window.thumbnail_list.count() >= 1
+    with pdfplumber.open(controller.doc.working_path) as pdf:
+        assert "WORD BODY TEXT" in (pdf.pages[0].extract_text() or "")
+    # The conversion produced the document - it isn't an edit made to
+    # it, so there's nothing to undo back to (same reasoning as the
+    # Tools-menu Word to PDF path's own operation_log entry, except
+    # here there shouldn't even be that one entry - see
+    # AppController.open_document_via_conversion).
+    assert controller.doc.operation_log == []
+    assert not window.undo_action.isEnabled()
+    assert source in window.recent_files.list()
+    _force_close(window)
+
+
+def test_opening_an_unreadable_word_document_via_open_does_not_strand_a_tab(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """The File > Open path's failure handling, mirroring
+    test_word_to_pdf_with_an_unreadable_source_does_not_strand_an_empty_tab
+    for the Tools-menu path: a source that fails to convert must show
+    an error, not crash, and not leave an empty tab behind."""
+    not_a_docx = tmp_path / "broken.docx"
+    not_a_docx.write_text("this is plainly not a Word document")
+    window = MainWindow()
+
+    errors: list[str] = []
+    with (
+        patch.object(QMessageBox, "critical", lambda *args, **kwargs: errors.append(str(args[2]))),
+        patch("core.ops.convert_to.libreoffice_binary", lambda: None),
+    ):
+        window._open_document_path(not_a_docx, PLACEMENT_NEW_TAB)
+
+    assert errors, "a failed conversion should report an error"
+    assert window.tab_widget.count() == 0
+    _force_close(window)
+
+
+def test_replacing_a_tab_with_an_unreadable_word_document_leaves_it_untouched(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Same ordering guarantee open_document already gives a bad PDF
+    path: the conversion is attempted before the current tab's session
+    is closed, so a source that fails to convert must not lose the
+    document already open in that tab."""
+    good = _make_pdf(tmp_path / "good.pdf", 2)
+    window = MainWindow()
+    _open_tab(window, good)
+    working_before = window.controller.doc.working_path
+
+    not_a_docx = tmp_path / "broken.docx"
+    not_a_docx.write_text("this is plainly not a Word document")
+
+    errors: list[str] = []
+    with (
+        patch.object(QMessageBox, "critical", lambda *args, **kwargs: errors.append(str(args[2]))),
+        patch("core.ops.convert_to.libreoffice_binary", lambda: None),
+    ):
+        window._open_document_path(not_a_docx, PLACEMENT_REPLACE_CURRENT)
+
+    assert errors, "a failed conversion should report an error"
+    assert window.tab_widget.count() == 1
+    assert window.controller.doc.working_path == working_before
+    with pikepdf.Pdf.open(window.controller.doc.working_path) as pdf:
+        assert len(pdf.pages) == 2
+    _force_close(window)
+
+
 def test_run_tool_applies_operation_via_dialog_values(qapp: QApplication, tmp_path: Path) -> None:
     src = _make_pdf(tmp_path / "src.pdf", 1)
     window = MainWindow()
