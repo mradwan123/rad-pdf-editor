@@ -194,15 +194,55 @@ class RemoveAnnotationsOperation(Operation):
         return "Removed annotations"
 
 
+def _visual_field_order(pdf: pikepdf.Pdf) -> dict[str, tuple[int, float, float]]:
+    """Maps each field's fully-qualified name to a (page index, top,
+    left) sort key taken from its own widget annotation's page and
+    rect - reading order, not the order `af.fields` happens to walk
+    the `/AcroForm /Fields` array/tree in, which only reflects
+    creation order and need not match where a field actually sits on
+    the page.
+
+    Built from pikepdf's own `AcroForm` helpers rather than walking
+    `/Annots`/`/Parent` by hand: `get_widget_annotations_for_page`
+    already filters to widgets, `get_field_for_annotation` already
+    resolves the `/Parent` chain into the same fully-qualified name
+    `af.fields` reports, and `Annotation.rect` is a pre-normalized
+    `Rectangle` (`llx <= urx`, `lly <= ury` regardless of how `/Rect`
+    was written), so no min/max is needed."""
+    af = pdf.acroform
+    order: dict[str, tuple[int, float, float]] = {}
+    for page_index, page in enumerate(pdf.pages):
+        for annot in af.get_widget_annotations_for_page(page):
+            name = str(af.get_field_for_annotation(annot).fully_qualified_name)
+            if name in order:
+                continue
+            # PDF's origin is bottom-left with y growing upward, so the
+            # top of the page is the *larger* y - negate it to sort
+            # top-to-bottom with a plain ascending sort.
+            order[name] = (page_index, -annot.rect.ury, annot.rect.llx)
+    return order
+
+
 def list_form_field_names(path: Path) -> list[str]:
     """Every fillable field's fully-qualified name in `path`'s
-    AcroForm - for GUI/CLI discovery before building a
-    `FillFormOperation`. Empty if the document has no form."""
+    AcroForm, in reading order (top-to-bottom, left-to-right per page,
+    pages in document order) - for GUI/CLI discovery before building a
+    `FillFormOperation`. Empty if the document has no form.
+
+    A field with no matching widget annotation (so its position can't
+    be determined - not expected in practice, but not assumed
+    impossible either) sorts after every positioned field, in its
+    original `af.fields` order."""
     with pikepdf.Pdf.open(path) as pdf:
         af = pdf.acroform
         if not af.exists:
             return []
-        return [str(f.fully_qualified_name) for f in af.fields]
+        names = [str(f.fully_qualified_name) for f in af.fields]
+        order = _visual_field_order(pdf)
+        unpositioned = len(order)
+        indexed = list(enumerate(names))
+        indexed.sort(key=lambda item: order.get(item[1], (unpositioned, 0.0, float(item[0]))))
+        return [name for _, name in indexed]
 
 
 @dataclass
