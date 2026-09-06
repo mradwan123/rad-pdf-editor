@@ -93,7 +93,10 @@ _EXPORT_TOOLS: dict[str, tuple[str, str]] = {
     "pdf_to_html": (".html", "HTML page (*.html)"),
     "pdf_to_jpg": (".jpg", "JPEG image (*.jpg)"),
 }
-_THUMBNAIL_SIZE = QSize(120, 160)
+#: 500% of the original 120x160 default, so a newly opened document
+#: (and Reset Zoom) start at 600x800 rather than 120x160. Still within
+#: the existing 60-720px zoom range below, so no clamp change needed.
+_THUMBNAIL_SIZE = QSize(600, 800)
 # View > Thumbnail zoom: width-driven (height is derived from
 # _THUMBNAIL_SIZE's own aspect ratio, recomputed from the *original*
 # width/height each time rather than compounded step-over-step, so
