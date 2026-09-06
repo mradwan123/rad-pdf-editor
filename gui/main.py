@@ -17,6 +17,7 @@ from core.logging_config import configure_logging, get_logger
 from core.security.sandbox import network_lockdown
 from gui.main_window import MainWindow
 from gui.palette import build_dark_palette
+from gui.qt_message_filter import install_qt_message_filter
 from gui.resources import build_app_icon
 
 log = get_logger(__name__)
@@ -34,6 +35,7 @@ def _load_stylesheet() -> str:
 
 def main() -> int:
     configure_logging()
+    install_qt_message_filter()  # before QApplication: Qt warns during its construction too
     app = QApplication(sys.argv)
     app.setStyle("Fusion")  # SPEC.md 6.2: Qt Fusion style, no custom component library
     app.setPalette(build_dark_palette())  # base colors - QSS alone doesn't reliably drive these
