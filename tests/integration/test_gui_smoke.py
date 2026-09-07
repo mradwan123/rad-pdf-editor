@@ -367,6 +367,58 @@ def test_merge_from_tools_menu_opens_a_document(qapp: QApplication, tmp_path: Pa
     _force_close(window)
 
 
+def test_merging_again_with_a_document_already_open_adds_to_it(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Regression: MergeOperation always replaces the working document
+    with exactly its `sources` (by design - see
+    tests/unit/test_merge_split.py's test_merge_undo_restores_prior_state).
+    But the dialog used to start with an empty file list every time,
+    so running Merge a second time on an already-open document silently
+    discarded it instead of adding to it - reported as "added one file,
+    it was ok, tried again, and it didn't work" (the first file's
+    content vanished with no error or warning). MergeDialog now
+    pre-adds the open tab's working file as a source, so a second
+    merge is cumulative."""
+    a = _make_pdf(tmp_path / "a.pdf", 1)
+    b = _make_pdf(tmp_path / "b.pdf", 2)
+    window = MainWindow()
+
+    def fake_exec_first(self: MergeDialog) -> QDialog.DialogCode:
+        self.file_list.addItem(str(a))
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(MergeDialog, "exec", fake_exec_first):
+        window._run_tool("merge", MergeDialog)
+
+    assert window.thumbnail_list.count() == 1
+
+    # The dialog is pre-populated with the current document, so
+    # accepting it unmodified (no extra Add Files at all) must be a
+    # true no-op, not a data-destroying one.
+    def fake_exec_noop(self: MergeDialog) -> QDialog.DialogCode:
+        assert self.file_list.count() == 1
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(MergeDialog, "exec", fake_exec_noop):
+        window._run_tool("merge", MergeDialog)
+
+    assert window.thumbnail_list.count() == 1
+
+    # Now actually add a second file via "Add Files..." - the real
+    # user action the bug report describes as "trying again".
+    def fake_exec_second(self: MergeDialog) -> QDialog.DialogCode:
+        assert self.file_list.count() == 1  # current document already there
+        self.file_list.addItem(str(b))
+        return QDialog.DialogCode.Accepted
+
+    with patch.object(MergeDialog, "exec", fake_exec_second):
+        window._run_tool("merge", MergeDialog)
+
+    assert window.thumbnail_list.count() == 3  # 1 (a) + 2 (b), not just 2
+    _force_close(window)
+
+
 def _make_docx(path: Path, *, body: str = "WORD BODY TEXT") -> Path:
     import docx
 
