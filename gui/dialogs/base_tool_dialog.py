@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -27,6 +28,31 @@ _W = TypeVar("_W", bound=QWidget)
 _WIDTH_MULTIPLIER = 1.25
 
 
+class _FormScrollArea(QScrollArea):
+    """A QScrollArea whose `sizeHint` follows the form inside it,
+    same fix as `properties_dialog.py`'s `_ReportScrollArea` and for
+    the same reason: the stock QScrollArea reports a small fixed hint
+    regardless of content, which would open a form with only its first
+    couple of rows visible and no hint that the rest scrolled off.
+
+    Following the content (rather than imposing our own cap) means a
+    short form still opens at its natural size with no visible
+    scrollbar - identical to before this existed - and only a form
+    long enough to hit Qt's own two-thirds-of-screen cap on `show()`
+    (see CLAUDE.md's CI section for that formula) actually needs to
+    scroll, at which point this is what makes the rows past the cap
+    reachable at all instead of silently clipped."""
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override, fixed name
+        content = self.widget()
+        if content is None:  # pragma: no cover - always set by callers
+            return super().sizeHint()
+        hint = content.sizeHint()
+        margin = 2 * self.frameWidth()
+        scrollbar = self.verticalScrollBar().sizeHint().width()
+        return QSize(hint.width() + margin + scrollbar, hint.height() + margin)
+
+
 class BaseToolDialog(QDialog):
     """Subclass and call `add_row(label, widget)` / `add_full_width(widget)`
     from `__init__` to populate the options form, and implement
@@ -38,7 +64,15 @@ class BaseToolDialog(QDialog):
     names ... set on every interactive widget as it's built").
     """
 
-    def __init__(self, title: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, title: str, parent: QWidget | None = None, scrollable: bool = False
+    ) -> None:
+        """`scrollable=True` puts the options form in a `QScrollArea`
+        instead of adding it to the dialog's layout directly - opt-in,
+        rather than the default for every dialog, since it's only
+        needed by a form whose row count depends on the open document
+        rather than being fixed by the tool itself (currently just
+        FillFormDialog - see gui/dialogs/fill_form_dialog.py)."""
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
@@ -53,7 +87,15 @@ class BaseToolDialog(QDialog):
         self._buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(self._form)
+        if scrollable:
+            container = QWidget()
+            container.setLayout(self._form)
+            scroll = _FormScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(container)
+            layout.addWidget(scroll)
+        else:
+            layout.addLayout(self._form)
         layout.addWidget(self._buttons)
 
     def add_row(self, label: str, widget: _W) -> _W:

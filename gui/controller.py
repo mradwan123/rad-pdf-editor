@@ -11,7 +11,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from core.errors import OperationError
+from core.errors import OperationError, PDFEditorError
 from core.logging_config import get_logger
 from core.model.document import DocumentSession
 from core.model.operation import Operation
@@ -109,6 +109,50 @@ class AppController:
         self._session = new_session
         self._autosave = AutosaveJournal(new_session.session_id)
         self.doc = DocumentSession(working_path=working, source_path=path)
+        self._dirty = False
+        self._checkpoint()
+
+    def open_document_via_conversion(self, source_path: Path, operation: Operation) -> None:
+        """Like open_document, but for a file this app can only edit as
+        a PDF (Word/PowerPoint/Excel/HTML, or an image - see
+        core.ops.common.CONVERTIBLE_OPEN_EXTENSIONS): `operation` is
+        the matching external-source conversion (docx_to_pdf, etc.),
+        run against a placeholder in the *new* session rather than
+        copying `source_path` in verbatim the way open_document does -
+        every editing Operation, and the QtPdf/fitz thumbnail
+        renderer, assume the working file already is a PDF.
+
+        Same ordering guarantee as open_document: the conversion is
+        attempted before the previous session is closed, so a
+        corrupt/unreadable source file leaves whatever was already
+        open untouched. `source_path` is kept as the original file
+        (not the converted PDF) for Recent Files, Properties, and the
+        audit trail - the same identity a real Operation carries
+        forward via `next_session`. The conversion itself is not an
+        undoable step: it produced the document, it isn't an edit made
+        to it - same reasoning as `_export_document`'s throwaway-
+        session conversions on the GUI side carrying no undo entry.
+
+        Goes through `placeholder.apply(operation)` (DocumentSession's
+        own apply), not `operation.apply(placeholder)` directly - the
+        former is what turns a raw library exception (e.g. python-docx's
+        `PackageNotFoundError` on an unreadable .docx, per CLAUDE.md's
+        "Word to PDF audit" entry) into `OperationError`. Calling the
+        Operation's `apply()` bare, as `_export_document` does on the
+        GUI side, would let that raw exception escape uncaught here.
+        """
+        new_session = SessionTempDir()
+        placeholder = DocumentSession(working_path=new_session.path / "empty.pdf", source_path=source_path)
+        try:
+            converted = placeholder.apply(operation)
+        except PDFEditorError:
+            new_session.close()
+            raise
+
+        self.close_session()
+        self._session = new_session
+        self._autosave = AutosaveJournal(new_session.session_id)
+        self.doc = DocumentSession(working_path=converted.working_path, source_path=source_path)
         self._dirty = False
         self._checkpoint()
 
