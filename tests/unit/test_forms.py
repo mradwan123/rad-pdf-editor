@@ -230,6 +230,82 @@ def test_list_form_field_names_empty_for_document_without_a_form(tmp_path: Path)
     assert list_form_field_names(working) == []
 
 
+def _make_pdf_with_positioned_fields(
+    path: Path, fields: list[tuple[str, int, tuple[float, float, float, float]]]
+) -> Path:
+    """Builds a PDF whose AcroForm `/Fields` array lists `fields` in
+    the given order, each placed as a widget on the stated 0-based
+    page index at the stated `/Rect` - independent of that array
+    order, so tests can construct a document where AcroForm order and
+    actual page position deliberately disagree."""
+    pdf = pikepdf.Pdf.new()
+    page_count = max(page_index for _, page_index, _ in fields) + 1
+    for _ in range(page_count):
+        pdf.add_blank_page(page_size=(300, 400))
+
+    field_objs = []
+    widgets_by_page: dict[int, list[pikepdf.Object]] = {}
+    for name, page_index, rect in fields:
+        field = pdf.make_indirect(
+            pikepdf.Dictionary(
+                {
+                    "/FT": pikepdf.Name("/Tx"),
+                    "/T": pikepdf.String(name),
+                    "/Rect": pikepdf.Array(list(rect)),
+                    "/Subtype": pikepdf.Name("/Widget"),
+                    "/Type": pikepdf.Name("/Annot"),
+                    "/V": pikepdf.String(""),
+                    "/DA": pikepdf.String("/Helv 12 Tf 0 g"),
+                }
+            )
+        )
+        field_objs.append(field)
+        widgets_by_page.setdefault(page_index, []).append(field)
+
+    for page_index, widgets in widgets_by_page.items():
+        pdf.pages[page_index].obj["/Annots"] = pikepdf.Array(widgets)
+
+    pdf.Root["/AcroForm"] = pdf.make_indirect(
+        pikepdf.Dictionary({"/Fields": pikepdf.Array(field_objs), "/NeedAppearances": True})
+    )
+    pdf.save(path)
+    return path
+
+
+def test_list_form_field_names_follows_page_position_not_acroform_order(
+    tmp_path: Path,
+) -> None:
+    """AcroForm /Fields lists "third" before "first" before "second" -
+    the wrong order for a user filling the form top-to-bottom. Each
+    field's actual position says first (top of page 1), second (bottom
+    of page 1), third (page 2) - list_form_field_names must follow
+    that reading order, not the raw array order."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    working = _make_pdf_with_positioned_fields(
+        session_dir / "working.pdf",
+        [
+            ("third", 1, (50, 300, 250, 320)),
+            ("first", 0, (50, 300, 250, 320)),
+            ("second", 0, (50, 100, 250, 120)),
+        ],
+    )
+    assert list_form_field_names(working) == ["first", "second", "third"]
+
+
+def test_list_form_field_names_orders_left_to_right_on_the_same_row(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    working = _make_pdf_with_positioned_fields(
+        session_dir / "working.pdf",
+        [
+            ("right", 0, (150, 300, 250, 320)),
+            ("left", 0, (50, 300, 100, 320)),
+        ],
+    )
+    assert list_form_field_names(working) == ["left", "right"]
+
+
 def test_fill_form_sets_value_and_generates_visible_appearance(tmp_path: Path) -> None:
     doc = _form_session(tmp_path)
     result = doc.apply(FillFormOperation(field_values={"name": "Jane Smith"}))
