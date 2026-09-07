@@ -44,7 +44,8 @@ from core.document_info import DocumentInfo, read_document_info
 from core.errors import OperationError, PDFEditorError
 from core.logging_config import get_logger
 from core.model.document import DocumentSession
-from core.ops.common import EXTERNAL_SOURCE_TOOL_IDS
+from core.model.operation import Operation
+from core.ops.common import CONVERTIBLE_OPEN_EXTENSIONS, EXTERNAL_SOURCE_TOOL_IDS
 from core.ops.forms import list_form_field_names
 from core.registry.registry import Registry, discover_and_load
 from core.session.audit_log import AuditLog
@@ -93,7 +94,10 @@ _EXPORT_TOOLS: dict[str, tuple[str, str]] = {
     "pdf_to_html": (".html", "HTML page (*.html)"),
     "pdf_to_jpg": (".jpg", "JPEG image (*.jpg)"),
 }
-_THUMBNAIL_SIZE = QSize(120, 160)
+#: 500% of the original 120x160 default, so a newly opened document
+#: (and Reset Zoom) start at 600x800 rather than 120x160. Still within
+#: the existing 60-720px zoom range below, so no clamp change needed.
+_THUMBNAIL_SIZE = QSize(600, 800)
 # View > Thumbnail zoom: width-driven (height is derived from
 # _THUMBNAIL_SIZE's own aspect ratio, recomputed from the *original*
 # width/height each time rather than compounded step-over-step, so
@@ -233,6 +237,14 @@ class MainWindow(QMainWindow):
         title_label.setObjectName("emptyStateTitle")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        greeting_label = QLabel(self.tr("Ahlan wa Sahlan ya Helween!"))
+        greeting_label.setObjectName("emptyStateSubtitle")
+        greeting_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        tagline_label = QLabel(self.tr("Rad-1 is happy to bring you some freedom."))
+        tagline_label.setObjectName("emptyStateSubtitle")
+        tagline_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         subtitle_label = QLabel(self.tr("Open a PDF to get started"))
         subtitle_label.setObjectName("emptyStateSubtitle")
         subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -245,6 +257,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(logo_label)
         layout.addSpacing(12)
         layout.addWidget(title_label)
+        layout.addWidget(greeting_label)
+        layout.addWidget(tagline_label)
         layout.addWidget(subtitle_label)
         layout.addSpacing(16)
         layout.addWidget(open_button, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -702,9 +716,17 @@ class MainWindow(QMainWindow):
     def _open_document(self) -> None:
         path_str, _selected_filter = QFileDialog.getOpenFileName(
             self,
-            self.tr("Open PDF"),
+            self.tr("Open"),
             "",
-            self.tr("PDF files (*.pdf)"),
+            self.tr(
+                "All supported files (*.pdf *.docx *.pptx *.xlsx *.html *.htm *.jpg *.jpeg *.png);;"
+                "PDF files (*.pdf);;"
+                "Word documents (*.docx);;"
+                "PowerPoint presentations (*.pptx);;"
+                "Excel workbooks (*.xlsx);;"
+                "HTML files (*.html *.htm);;"
+                "Images (*.jpg *.jpeg *.png)"
+            ),
             options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not path_str:
@@ -721,6 +743,14 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         return dialog.placement
+
+    def _build_open_conversion_operation(self, tool_id: str, path: Path) -> Operation:
+        """The Operation `_open_document_path` runs for a non-PDF file
+        - see CONVERTIBLE_OPEN_EXTENSIONS. jpg_to_pdf takes `sources`
+        (plural, shared with its Tools-menu combine-several-images
+        form) rather than the `source_path` the other four take."""
+        kwargs = {"sources": [path]} if tool_id == "jpg_to_pdf" else {"source_path": path}
+        return self.registry.get(tool_id).build_operation(**kwargs)
 
     def _open_document_path(self, path: Path, placement: str | None = None) -> None:
         """Shared by the Open dialog and the Recent Files menu. Asks
@@ -744,8 +774,17 @@ class MainWindow(QMainWindow):
             tab = self._add_tab(activate=False)
             opened_new_tab = True
 
+        # A Word/PowerPoint/Excel/HTML/image file is converted to a
+        # PDF first - see AppController.open_document_via_conversion
+        # for why it can't just be copied in like a PDF can.
+        tool_id = CONVERTIBLE_OPEN_EXTENSIONS.get(path.suffix.lower())
         try:
-            tab.controller.open_document(path)
+            with self._busy_cursor():
+                if tool_id is not None:
+                    operation = self._build_open_conversion_operation(tool_id, path)
+                    tab.controller.open_document_via_conversion(path, operation)
+                else:
+                    tab.controller.open_document(path)
         except PDFEditorError as exc:
             # A recent-file entry that fails to open (moved/deleted
             # since last time) is stale - drop it so it doesn't keep
@@ -1283,21 +1322,50 @@ class MainWindow(QMainWindow):
         if no engine could render the document at all.
 
         Two engines, because they genuinely disagree about which files
-        are readable. The app opens and validates documents with pikepdf
-        (qpdf), which silently repairs a damaged cross-reference table,
-        so a truncated PDF opens perfectly happily and reports its real
-        page count - while QtPdf rejects the identical file outright
-        with InvalidFileFormat. That combination used to log one line
-        and return, leaving a document that was "open" with an
+        are readable - and, separately, about what's actually on a page
+        that both agree they can read.
+
+        Load failure: the app opens and validates documents with
+        pikepdf (qpdf), which silently repairs a damaged cross-reference
+        table, so a truncated PDF opens perfectly happily and reports
+        its real page count - while QtPdf rejects the identical file
+        outright with InvalidFileFormat. That combination used to log
+        one line and return, leaving a document that was "open" with an
         empty grid and nothing on screen explaining why: the reported
         "I open a PDF and there is no thumbnail" bug, reproduced exactly
         against a PDF truncated to 85% of its length.
 
-        QtPdf stays the primary engine (unchanged for every file that
-        already worked). PyMuPDF - already a dependency, and the same
-        renderer the conversion ops use - is tried only when QtPdf
-        refuses, and renders those damaged files fine.
+        Silent content omission: QtPdf's render() paints zero
+        annotations by default (confirmed: a plain rect annotation
+        renders invisibly without `RenderFlag.Annotations`) and, worse,
+        an AcroForm widget - the kind `CreateFormFieldOperation` and
+        `FillFormOperation` produce - renders as nothing *even with*
+        that flag set, while PyMuPDF renders the identical widget
+        correctly. Confirmed by hand: a freshly created text field with
+        a default value came back as 0 non-background pixels via QtPdf,
+        351 via PyMuPDF, in the exact same rendered rect. This is a
+        structural QtPdf limitation, not a missing flag - pdfium needs a
+        form-filling environment to paint widget appearances that
+        `QPdfDocument` never sets up, and Qt exposes no API for it. So a
+        document containing any AcroForm field is routed to the PyMuPDF
+        fallback below unconditionally - the reported "I can't see it
+        when creating a form field" bug: the field really was created
+        (verified via `list_form_field_names`/fitz), QtPdf just never
+        painted it in the thumbnail that's supposed to show it.
+
+        QtPdf stays the primary engine for everything else (unchanged
+        for every plain file that already worked). PyMuPDF - already a
+        dependency, and the same renderer the conversion ops use - is
+        used whenever QtPdf refuses to load a file, or can't be trusted
+        to show what's actually in it.
         """
+        try:
+            has_form_fields = bool(list_form_field_names(path))
+        except Exception:
+            has_form_fields = False
+        if has_form_fields:
+            return self._render_thumbnails_with_fitz(thumbnail_list, path)
+
         # No parent: this is a short-lived, throwaway document used
         # only to render thumbnails for this one _refresh() call. A
         # `self`-parented QPdfDocument would live as long as
@@ -1313,6 +1381,9 @@ class MainWindow(QMainWindow):
         log.warning(
             "QtPdf could not load '%s' for thumbnails; falling back to PyMuPDF.", path
         )
+        return self._render_thumbnails_with_fitz(thumbnail_list, path)
+
+    def _render_thumbnails_with_fitz(self, thumbnail_list: QListWidget, path: Path) -> bool:
         try:
             with fitz.open(str(path)) as src:
                 for i in range(src.page_count):

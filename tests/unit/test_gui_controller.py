@@ -21,6 +21,15 @@ def _make_pdf(path: Path, num_pages: int) -> Path:
     return path
 
 
+def _make_docx(path: Path, *, body: str = "WORD BODY TEXT") -> Path:
+    import docx
+
+    document = docx.Document()
+    document.add_paragraph(body)
+    document.save(str(path))
+    return path
+
+
 @pytest.fixture(autouse=True)
 def _isolated_app_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PDFEDITOR_APP_DATA_DIR", str(tmp_path / "appdata"))
@@ -65,6 +74,76 @@ def test_failed_open_does_not_destroy_the_currently_open_document(tmp_path: Path
 
     assert controller.is_open
     assert controller.doc.working_path == working_before
+    controller.close_session()
+
+
+def test_open_document_via_conversion_produces_a_real_pdf_keeping_original_identity(
+    tmp_path: Path,
+) -> None:
+    """File > Open on a .docx (see core.ops.common.CONVERTIBLE_OPEN_EXTENSIONS)
+    runs it through this instead of open_document - the working file
+    must actually be a PDF (open_document alone would have copied the
+    .docx in verbatim, which every editing Operation and the
+    QtPdf/fitz thumbnail renderer assume is a PDF), while source_path
+    still names the real original file, not the converted copy."""
+    src = _make_docx(tmp_path / "in.docx")
+    controller = AppController()
+    operation = controller.registry.get("docx_to_pdf").build_operation(source_path=src)
+
+    controller.open_document_via_conversion(src, operation)
+
+    assert controller.is_open
+    assert controller.doc.source_path == src
+    assert controller.doc.working_path is not None
+    assert controller.doc.working_path.suffix == ".pdf"
+    with pikepdf.Pdf.open(controller.doc.working_path) as pdf:
+        assert len(pdf.pages) >= 1
+    controller.close_session()
+
+
+def test_open_document_via_conversion_records_no_undo_entry(tmp_path: Path) -> None:
+    """The conversion produced the document - it isn't an edit made to
+    it, same reasoning _export_document's throwaway-session
+    conversions already use on the export side."""
+    src = _make_docx(tmp_path / "in.docx")
+    controller = AppController()
+    operation = controller.registry.get("docx_to_pdf").build_operation(source_path=src)
+
+    controller.open_document_via_conversion(src, operation)
+
+    assert controller.doc.operation_log == []
+    assert not controller.can_undo
+    controller.close_session()
+
+
+def test_failed_open_via_conversion_does_not_destroy_the_currently_open_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same ordering guarantee open_document already gives plain PDFs:
+    a source that fails to convert must leave whatever was already
+    open untouched, not just fail cleanly in isolation.
+
+    The fallback engine is forced because LibreOffice is permissive
+    enough to convert a plain text file with a .docx name quite
+    happily - python-docx is the engine that rejects it (see
+    tests/integration/test_gui_smoke.py's identical note on the
+    Tools-menu path)."""
+    monkeypatch.setattr("core.ops.convert_to.libreoffice_binary", lambda: None)
+    good = _make_pdf(tmp_path / "good.pdf", 1)
+    controller = AppController()
+    controller.open_document(good)
+    working_before = controller.doc.working_path
+
+    broken = tmp_path / "broken.docx"
+    broken.write_text("this is plainly not a Word document")
+    operation = controller.registry.get("docx_to_pdf").build_operation(source_path=broken)
+
+    with pytest.raises(OperationError):
+        controller.open_document_via_conversion(broken, operation)
+
+    assert controller.is_open
+    assert controller.doc.working_path == working_before
+    assert controller.doc.source_path == good
     controller.close_session()
 
 
