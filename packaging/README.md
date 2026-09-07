@@ -9,16 +9,35 @@ specs are cross-platform by design).
 | Platform | Script | Status |
 |---|---|---|
 | Linux | `packaging/build.sh` | **Verified** — real build via `pyinstaller`, real launch (`QT_QPA_PLATFORM=offscreen`, stayed running 5+s with an empty log - the full app, all `core`/`gui` imports, actually initialized) |
-| macOS | `packaging/build.sh` (same script) | Not yet verified on real macOS hardware |
+| macOS (arm64) | `.github/workflows/build-macos.yml` (`workflow_dispatch`) | **Verified** — same build + stay-running-5s launch check, run for real on a `macos-latest` GitHub Actions runner (Apple Silicon). Not yet verified on Intel Macs, or via `packaging/build.sh` run locally on a Mac. |
 | Windows | `packaging/build.ps1` | Not yet verified on a real Windows machine |
 
-Only the Linux build has actually been run and checked. The Windows/
-macOS paths are provided because the spec itself is genuinely
+Linux and macOS (arm64) have both actually been built and launched.
+The Windows path is provided because the spec itself is genuinely
 cross-platform (nothing in `pdf-editor.spec` is Linux-specific), but
 don't take "not yet verified" as "definitely broken" or "definitely
 fine" — it means exactly what it says: nobody has run it there yet. If
-you're the first to build on Windows or macOS, please update this
-table with what you found.
+you're the first to build on Windows or an Intel Mac, please update
+this table with what you found.
+
+## Getting a macOS build without a Mac
+
+`.github/workflows/build-macos.yml` builds on a real macOS GitHub
+Actions runner and uploads the resulting single-file binary as a
+workflow artifact - useful when you need a macOS build but the only
+machine on hand is Linux/Windows (PyInstaller does not cross-compile;
+a binary can only be built on the OS it will run on). Trigger it with:
+
+```bash
+gh workflow run build-macos.yml --ref <branch-or-main>
+gh run watch   # or: gh run list --workflow=build-macos.yml
+gh run download <run-id> -n rad-pdf-editor-macos-arm64
+```
+
+The unsigned binary will trigger Gatekeeper on first launch
+("cannot be opened because the developer cannot be verified") since
+it isn't notarized - either right-click > Open and confirm once, or
+clear the quarantine flag: `xattr -d com.apple.quarantine rad-pdf-editor`.
 
 ## Build
 
