@@ -236,6 +236,14 @@ class MainWindow(QMainWindow):
         title_label.setObjectName("emptyStateTitle")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        greeting_label = QLabel(self.tr("Ahlan wa Sahlan ya Helween!"))
+        greeting_label.setObjectName("emptyStateSubtitle")
+        greeting_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        tagline_label = QLabel(self.tr("Rad-1 is happy to bring you some freedom."))
+        tagline_label.setObjectName("emptyStateSubtitle")
+        tagline_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         subtitle_label = QLabel(self.tr("Open a PDF to get started"))
         subtitle_label.setObjectName("emptyStateSubtitle")
         subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -248,6 +256,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(logo_label)
         layout.addSpacing(12)
         layout.addWidget(title_label)
+        layout.addWidget(greeting_label)
+        layout.addWidget(tagline_label)
         layout.addWidget(subtitle_label)
         layout.addSpacing(16)
         layout.addWidget(open_button, alignment=Qt.AlignmentFlag.AlignCenter)
